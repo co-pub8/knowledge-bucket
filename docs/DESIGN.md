@@ -638,10 +638,26 @@ kb vectorize                  # vector index構築（--engine tfidf|embedding|lo
 kb collections                # 仮想コレクション一覧表示
 kb serve                      # ローカルWeb UI起動（Flask）
 kb raw <doc_id>               # rawデータの取得・表示（S3/R2/ローカル）
+kb watch                      # 自動メンテナンスタイマー（ingest→index→graph→vectors を定期実行。
+                              #   --interval N 秒、--once で1ショット、--analyze で並列分析も組込み）
 ```
 
 `kb analyze --retry-failed` と `kb ingest --analyze` はどちらも `-w/--workers N` を受け取り、
 ai-hub-agent-proxy のsubprocessをN並列で起動してバルク分析のwall-clockを約N分の1に短縮する。
+
+### 学習データ生成コマンド
+
+corpus の分析済み doc から自社ドメイン特化 LLM 向けの SFT（Supervised Fine-Tuning）データセットを生成する。詳細は [TRAINING_DATA_GENERATION.md](TRAINING_DATA_GENERATION.md) を参照。
+
+```bash
+kb generate                   # 単一 JSONL 出力。--concept / --type（AND 条件）で doc 絞り込み、
+                              #   --pairs（doc 1件あたりペア数）、--format openai|alpaca、
+                              #   --limit、-o <path>
+kb sft                        # ワンコマンド SFT データセットビルド。生成→全体 dedup→決定的シャッフル→
+                              #   train/val split→統計出力を1ステップで実行。resume 対応。
+                              #   --pairs / --split / --seed / --concept / --type / --limit /
+                              #   --format / --output-dir / --no-resume
+```
 
 ### `kb add`
 

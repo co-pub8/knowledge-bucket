@@ -78,6 +78,7 @@ kb search "hello"
 | `kb concepts suggest` | concept noteの昇格候補を提案・生成 |
 | `kb health` | グラフ品質メトリクス表示（`--json`） |
 | `kb concept <concept_id>` | 概念メタデータ・関連文書・共起概念表示 |
+| `kb watch` | 自動メンテナンスタイマー（ingest→index→graph→vectors を定期実行。`--interval` 秒、`--once` で1ショット、`--analyze` で並列分析も組込み） |
 
 ### エクスポート・ストレージ
 
@@ -86,6 +87,15 @@ kb search "hello"
 | `kb export parquet` | グラフデータをParquetでエクスポート |
 | `kb raw <doc_id>` | rawデータの取得・表示（S3/R2/ローカル） |
 | `kb collections` | 仮想コレクション一覧表示 |
+
+### 学習データ生成
+
+| コマンド | 説明 |
+|---|---|
+| `kb generate` | 単一 JSONL 出力。`--concept` / `--type`（AND 条件）で doc 絞り込み、`--pairs`、`--format openai\|alpaca`、`--limit`、`-o` |
+| `kb sft` | ワンコマンド SFT データセットビルド（生成→全体 dedup→シャッフル→train/val split→統計、resume 対応）。`--pairs` / `--split` / `--seed` / `--concept` / `--type` / `--limit` / `--format` / `--output-dir` / `--no-resume` |
+
+詳細は [`docs/TRAINING_DATA_GENERATION.md`](docs/TRAINING_DATA_GENERATION.md) を参照。
 
 ### Web UI
 
