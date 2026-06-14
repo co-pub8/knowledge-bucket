@@ -5,6 +5,8 @@ import os
 import random
 import time
 
+import yaml
+
 RECORDS_DIR = "records"
 DOC_DIR = "doc"
 CONCEPT_DIR = "concept"
@@ -13,6 +15,10 @@ INBOX_DIR = "inbox"
 
 CONFIG_FILENAME = "kb.yml"
 
+# Top-level keys persisted in config/kb.yml. Kept as constants so callers and
+# tests don't depend on string literals scattered across the codebase.
+AGENT_MODEL_KEY = "agent_model"
+
 DEFAULT_CONFIG = """\
 # Knowledge Bucket configuration
 records_dir: records
@@ -20,6 +26,7 @@ doc_dir: doc
 concept_dir: concept
 inbox_dir: inbox
 shard_depth: 2  # hex chars per directory level
+agent_model: ""
 """
 
 DEFAULT_ALIASES = """\
@@ -172,3 +179,68 @@ def ensure_dirs(root: str) -> None:
         os.path.join(root, INBOX_DIR),
     ]:
         os.makedirs(d, exist_ok=True)
+
+
+# Optional storage directories created on demand by Phase 13.1+ code paths.
+# Kept as module constants (not added to ``ensure_dirs``) so users who never
+# use fine-tuning don't see empty .kb/models/ and .kb/finetune/ dirs after
+# ``kb init``.
+MODELS_DIR = ".kb/models"
+FINETUNE_DIR = ".kb/finetune"
+
+
+def ensure_models_dirs(root: str) -> None:
+    """Create the fine-tuning storage directories under root.
+
+    Safe to call repeatedly; existing dirs are left untouched. Called by
+    ``kb init`` (idempotent) and by the relevant subcommands on demand.
+    """
+    for d in [os.path.join(root, MODELS_DIR),
+              os.path.join(root, FINETUNE_DIR)]:
+        os.makedirs(d, exist_ok=True)
+
+
+def _config_path(root: str) -> str:
+    return os.path.join(root, CONFIG_DIR, CONFIG_FILENAME)
+
+
+def get_config_value(root: str, key: str, default: str | None = None) -> str | None:
+    """Read a scalar top-level value from config/kb.yml.
+
+    Returns ``default`` when the file is missing, empty, or the key is absent.
+    The existing config file holds string scalars (records_dir, shard_depth,
+    user_interests block, etc.); non-string values are stringified so callers
+    always get a consistent ``str | None`` shape.
+    """
+    path = _config_path(root)
+    if not os.path.exists(path):
+        return default
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if key not in data:
+        return default
+    val = data[key]
+    if val is None:
+        return default
+    if isinstance(val, str):
+        return val
+    return str(val)
+
+
+def set_config_value(root: str, key: str, value: str) -> None:
+    """Set a scalar top-level value in config/kb.yml, preserving other keys.
+
+    Creates the file (and its parent directory) if it does not exist.
+    The previous file is read in full, the key is updated, and the file is
+    re-written via ``yaml.safe_dump`` so the rest of the config survives.
+    """
+    path = _config_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data: dict = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    data[key] = value
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True,
+                       sort_keys=False)
