@@ -7,7 +7,7 @@
 
 ## 現在の状況
 
-Phase 1〜11完了。482テスト合格、lint clean。
+Phase 1〜12完了。512テスト合格、lint clean。
 Phase 8は文書数30万件/repo 5GBまで着手しない。
 
 ---
@@ -229,3 +229,92 @@ my-knowledge/               # ユーザーのナレッジデータ（Git管理�
 - [x] 現在のmainブランチのコミットを `git push` でoriginに反映
 
 **完了基準**: `git status` が `Your branch is up to date with 'origin/main'` であること。
+
+---
+
+## Phase 12: AI分析刷新・SFT生成基盤・自動運用 ✅
+
+Phase 11 公開後、knowledge bucket の corpus を自社ドメイン特化 LLM の SFT 原料にするため、分析・embedding・生成の各層を強化した。OpenAI 依存を排して [ai-hub-agent-proxy](https://github.com/nobu007/ai-hub_agent_proxy) 経由に統一し、bge-m3 ローカル embedding を既定化、`kb generate` / `kb sft` で SFT データを生成、`kb watch` で運用を自動化した。
+
+### 12.1 AI分析パイプライン刷新 (ai-hub-agent-proxy 統合) ✅
+
+OpenAI API の直接呼び出しを撤廃し、ローカル CLI の [ai-hub-agent-proxy](https://github.com/nobu007/ai-hub_agent_proxy) 経由に統一。Claude Code プライマリ / OpenCode フォールバックのプロトコルで動作する。
+
+- [x] `src/kb/analyzer.py` を ai-hub-agent-proxy 呼び出しに置換。`KB_AGENT_PROXY` 環境変数対応、未設定時は `~/ai-hub_agent_proxy/dist/cli.js` を自動検出
+- [x] 並列分析ワーカー: `-w/--workers N` で proxy subprocess を N 並列起動し、バルク分析の wall-clock を約 N 分の 1 に短縮
+- [x] front matter 解析の堅牢化: 壊れた YAML / 必須フィールド欠損を許容し、`analysis.confidence` 不在の文書だけ `--retry-failed` で再分析
+- [x] analyze 後の自動 re-index: 概念付与後に FTS index を即時同期
+- [x] `get_api_key()` を `KB_LLM_API_KEY` → `KB_AGENT_PROXY` 存在チェックに変更
+
+**完了基準**: `KB_AGENT_PROXY=... kb ingest --analyze -w 4` で proxy 経由で並列分析され、front matter に concepts / summary / importance / confidence が書き込まれること。
+
+### 12.2 ローカル embedding によるセマンティック検索 ✅
+
+Embedding ベースの意味検索をクラウド API 依存から脱却し、sentence-transformers (bge-m3) を既定エンジン化。
+
+- [x] `src/kb/embeddings.py`: `--engine embedding` で `BAAI/bge-m3` を使用（多言語 JA/EN・8192 トークン）。環境変数 `KB_EMBED_MODEL` でモデル切替可
+- [x] query / doc embedding の整合性: 同じ `normalize_embeddings` 設定で生成、トランケーション長はモデル max_seq_length に揃える
+- [x] `SentenceTransformerEngine` のシングルトンキャッシュ化: 重複ロードを排除し、起動コストを 1 回に圧縮
+- [x] 警告抑制: progress bar / モデル重複ロード等の noisy warnings を整理
+- [x] フォールバック: `--engine tfidf`（既定・デフォルト無依存） / `--engine openai`（旧 API） / `--engine local`（hash）
+
+**完了基準**: `pip install -e ".[embedding]"` → `kb vectorize --engine embedding` → `kb search "query" --semantic` がローカルだけで完結し、外部 API キーを要求しないこと。
+
+### 12.3 データ品質保証 ✅
+
+corpus のスケールに伴う重複・破損・分析漏れを体系的に検知・防止する仕組みを整備。
+
+- [x] `kb doctor` 品質チェックコマンド: QC1 物理配置 / QC2 front matter / QC3 重複 / QC4 分析カバレッジ / QC5 整合性。問題があれば非 0 終了
+- [x] `add-*` コマンドの `source_key` ベース dedup: 同一ソース URL/参照の二重取り込みを `kb add` / `kb add-paper` / `kb add-pdf` / `kb add-repo` / `kb add-video` 横断で防止
+- [x] 全 `add-*` コマンドに `content_hash` 付与: 同一本文の dedup と差分検知の基盤
+- [x] front matter の concept / tag ラベル quoting: 値に `:` や `#` を含むラベルが YAML 解析で壊れないように保護
+- [x] `tests/test_generate.py` をはじめとするテスト群で各 QC を担保
+
+**完了基準**: `kb doctor` が `kb init` した直後の新規 bucket で 0 を返し、意図的に重複 / 破損 / 未分析の doc を混ぜた bucket では非 0 を返すこと。
+
+### 12.4 パフォーマンス最適化 ✅
+
+corpus スケール時のボトルネックを解消。
+
+- [x] `build_concept_edges` の O(K²) SQL 自己結合を Python co-occurrence map に置換。概念数 K に対し概念ペア全列挙を廃し、`{concept_id: set(doc_ids)}` の単一パス + 共有 doc 数で重み付け。`df in [2, hub_threshold]` / `is_stop=0` / `min_cooccurrence` フィルタ・top_k-per-concept・双方向挿入・edges スキーマ・int 返り値をすべて維持
+- [x] インクリメンタルグラフビルド: `kb graph build` が git diff で差分 doc のみ処理
+- [x] N+1 クエリ問題の解消: graph / health / concepts 経路でバッチ取得に統一
+- [x] analyzer hardening: 壊れた front matter / 空本文 / 巨大 front matter の境界ケースに対する防御
+- [x] SQLite インデックス追加、bulk insert 化
+
+**完了基準**: 1 万 doc の corpus で `kb graph build` が旧版より 1 桁以上速く完了し、生成される concept_edges の本数・重み・フィルタが旧版と一致すること（回帰テストで担保）。
+
+### 12.5 自動メンテナンス ✅
+
+常時運用のための「放っておいても壊れない」経路を整備。
+
+- [x] `add` 後の即時インデックス: `kb add` 実行時にその場で `sync_index` を呼び、次の `kb search` で必ずヒットすることを保証
+- [x] `kb watch`: 一定間隔（既定 300s）で `ingest → sync_index → build_graph (incremental) → build_embeddings` を回すフォアグラウンドデーモン。`--once` で cron からの 1 ショット実行、`--analyze` で取り込み後の並列分析もサイクルに組込み可能
+
+**完了基準**: 別ターミナルから `echo ... > .kb/inbox/foo.md` → 次の `kb watch` サイクル（または `--once` 1 回）で grep 可能な doc として登録され、FTS index / 概念グラフ / embedding に反映されること。
+
+### 12.6 ドメイン特化 SFT データ生成 ✅
+
+knowledge bucket の corpus から SFT（Supervised Fine-Tuning）用の instruction-output ペアを生成する仕組み。`kb sft` を推奨エントリポイントとし、`kb generate` を細かい制御用のプリミティブとして位置づける。
+
+- [x] `src/kb/generate.py`: `generate()` プリミティブ（単一 JSONL 出力）と `build_sft()`（dataset 全体ビルド）
+- [x] `src/kb/prompts/training_data.md`: 「本文の事実に基づく・憶測禁止・未記載は正直に」を指示するプロンプト
+- [x] `kb generate`: 単一ドメイン向け JSONL 出力。`--concept` / `--type`（AND 条件）で doc 絞り込み、`--pairs`（doc 1 件あたりの生成ペア数）、`--format openai|alpaca`、`--limit`、`-o`
+- [x] `kb sft`: 全 doc 対応のワンコマンド。生成 → 全体 dedup → 決定的シャッフル → train/val split → 統計出力を 1 ステップで実行。`--pairs` / `--split` / `--seed` / `--concept` / `--type` / `--limit` / `--format` / `--output-dir` / `--no-resume`
+- [x] resume 機構: `manifest.jsonl` に処理済み doc を記録し、再実行で skip。`all.jsonl`（真実・追記型）から `train.jsonl` / `val.jsonl` を毎回再導出（空で上書きしない）
+- [x] 出力: `.kb/training/sft-dataset/{all,train,val}.jsonl` + `stats.json` + `manifest.jsonl`
+- [x] 品質保証: grounding（本文事実ベース）/ 難易度分散（basic / intermediate / advanced を各 doc で混在）/ 横断 dedup（指示文の sha1 下位 12 桁）/ 空ペア破棄 / fenced-JSON 耐性
+- [x] `docs/TRAINING_DATA_GENERATION.md` プレイブック: 前提（kb doctor / kb health）、ドメイン選定基準（df ≥ 3 推奨・狭すぎ広すぎ回避）、実行手順、検証スクリプト、ワークフロー、既知の制限、corpus への追加方法
+- [x] モデル選択ガイダンス: 生成は品質最優先のため **Sonnet 級以上（既定）を必ず使用**。haiku 等の軽量モデルはスモークテスト専用。モデル切替は環境変数 `AIHUB_AGENT_PROXY_LLM_MODEL`（`-- --model` は proxy が prompt に混入するため使用不可）
+
+**完了基準**: 任意の分析済み corpus に対し `kb sft --pairs 5 --split 0.9` が `all.jsonl` / `train.jsonl` / `val.jsonl` / `stats.json` を生成し、再実行で処理済み doc が skip され、`train` / `val` 件数が `all` 件の分割比と一致すること。
+
+### 12.7 CLI ドキュメント同期 ✅
+
+実装とドキュメントの乖離をゼロにする。
+
+- [x] `README.md` の CLI コマンド一覧を実装と同期
+- [x] `docs/DESIGN.md` の section 15 CLI 一覧に全コマンド（`kb add-video` / `kb raw` / `kb index --verify/--repair` / `kb doctor` / `kb watch` / `kb sft` / `kb generate` ほか）を列挙
+- [x] `docs/TRAINING_DATA_GENERATION.md` の playbook で `kb sft` を推奨パスとして明示
+
+**完了基準**: `grep -E "kb (add-video|raw|doctor|watch|sft|generate|index --verify|index --repair)" README.md docs/DESIGN.md` が全ヒットすること。
