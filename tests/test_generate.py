@@ -13,7 +13,6 @@ from kb.generate import (
 
 
 def _write_doc(tmp, name, source_type, concepts_yaml, body):
-    import hashlib
     from kb.core import generate_ulid
     ulid = generate_ulid()
     doc_dir = os.path.join(tmp, "records", "doc", name[:2], name[2:4])
@@ -79,10 +78,16 @@ class TestGenerateForDoc:
         d.mkdir()
         path = _write_doc(str(d), "gen", "web", "", "the body content")
         agent_out = json.dumps([
-            {"difficulty": "basic", "instruction": "What is it?", "context": "", "response": "It is X.", "tags": ["x"]},
-            {"difficulty": "advanced", "instruction": "Compare A and B.", "context": "", "response": "A is faster.", "tags": []},
-            {"difficulty": "basic", "instruction": "What is it?", "context": "", "response": "dup", "tags": []},  # dup
-            {"difficulty": "basic", "instruction": "", "context": "", "response": "no instr", "tags": []},  # skip
+            {"difficulty": "basic", "instruction": "What is it?",
+             "context": "", "response": "It is X.", "tags": ["x"]},
+            {"difficulty": "advanced", "instruction": "Compare A and B.",
+             "context": "", "response": "A is faster.", "tags": []},
+            # dup
+            {"difficulty": "basic", "instruction": "What is it?",
+             "context": "", "response": "dup", "tags": []},
+            # skip
+            {"difficulty": "basic", "instruction": "",
+             "context": "", "response": "no instr", "tags": []},
         ])
         with patch("kb.generate.call_agent", return_value=agent_out):
             recs = generate_for_doc(str(path), n_pairs=4, fmt="openai")
@@ -96,7 +101,8 @@ class TestGenerateForDoc:
         d.mkdir()
         path = _write_doc(str(d), "fence", "web", "", "body")
         fenced = "```json\n" + json.dumps([
-            {"instruction": "Q", "context": "", "response": "A", "difficulty": "basic", "tags": []},
+            {"instruction": "Q", "context": "", "response": "A",
+             "difficulty": "basic", "tags": []},
         ]) + "\n```"
         with patch("kb.generate.call_agent", return_value=fenced):
             recs = generate_for_doc(str(path), n_pairs=1, fmt="openai")
@@ -116,7 +122,12 @@ class TestGenerateForDoc:
 
 class TestBuildSft:
     def _make_kb(self, tmp):
-        for i, body in enumerate(["alpha content about RAG", "beta content about agents", "gamma about vectors"]):
+        bodies = [
+            "alpha content about RAG",
+            "beta content about agents",
+            "gamma about vectors",
+        ]
+        for i, body in enumerate(bodies):
             _write_doc(str(tmp), f"d{i:02x}", "web", "", body)
         return str(tmp)
 
@@ -127,11 +138,12 @@ class TestBuildSft:
 
         def fake_gen(doc_path, *, n_pairs, fmt, system, seen):
             from kb.generate import _to_output
-            import os
             return [_to_output({"instruction": f"Q-{doc_path[-4:]}-{j}",
-                                "context": "", "response": f"A{j}", "difficulty": "basic",
-                                "tags": []}, fmt, system) | {"_source_doc": doc_path[-6:],
-                                "_difficulty": "basic", "_tags": []} for j in range(n_pairs)]
+                                "context": "", "response": f"A{j}",
+                                "difficulty": "basic", "tags": []},
+                               fmt, system) | {"_source_doc": doc_path[-6:],
+                                                "_difficulty": "basic",
+                                                "_tags": []} for j in range(n_pairs)]
 
         with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
             stats = build_sft(root, n_pairs=4, split=0.5, seed=1,
@@ -140,15 +152,22 @@ class TestBuildSft:
         assert stats["train_pairs"] + stats["val_pairs"] == 12
         assert stats["val_pairs"] >= 1
         assert stats["source_docs"] == 3
-        import json, os
-        train = [json.loads(l) for l in open(os.path.join(stats["output_dir"], "train.jsonl"))]
-        val = [json.loads(l) for l in open(os.path.join(stats["output_dir"], "val.jsonl"))]
+        import json
+        import os
+        train_path = os.path.join(stats["output_dir"], "train.jsonl")
+        val_path = os.path.join(stats["output_dir"], "val.jsonl")
+        train = [json.loads(line) for line in open(train_path)]
+        val = [json.loads(line) for line in open(val_path)]
         assert len(train) + len(val) == 12
         # determinism: same seed → same split
         with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
-            stats2 = build_sft(root, n_pairs=4, split=0.5, seed=1, output_dir=str(tmp_path / "out2"))
-        train2 = [json.loads(l) for l in open(os.path.join(stats2["output_dir"], "train.jsonl"))]
-        assert [r["messages"][1]["content"] for r in train] == [r["messages"][1]["content"] for r in train2]
+            stats2 = build_sft(
+                root, n_pairs=4, split=0.5, seed=1, output_dir=str(tmp_path / "out2"),
+            )
+        train2_path = os.path.join(stats2["output_dir"], "train.jsonl")
+        train2 = [json.loads(line) for line in open(train2_path)]
+        assert [r["messages"][1]["content"] for r in train] == \
+            [r["messages"][1]["content"] for r in train2]
 
     def test_resume_skips_done(self, tmp_path):
         d = tmp_path / "kb"

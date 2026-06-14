@@ -49,7 +49,7 @@ def _extract_fm_field(doc_path: str, field: str) -> str:
             if ln.startswith(f"{field}:"):
                 return ln.split(":", 1)[1].strip().strip('"')
             if ln.strip() == "---" and any(
-                l.startswith("id:") for l in open(doc_path)
+                line.startswith("id:") for line in open(doc_path)
             ):
                 # past front matter start; allow one --- close
                 pass
@@ -149,7 +149,10 @@ def generate_for_doc(doc_path: str, *, n_pairs: int = 5,
         raise RuntimeError("agent did not return a JSON array")
 
     if not system:
-        system = "あなたはドメイン特化のAIアシスタントです。提供された知識に基づき正確に答えてください。"
+        system = (
+            "あなたはドメイン特化のAIアシスタントです。"
+            "提供された知識に基づき正確に答えてください。"
+        )
     seen = seen if seen is not None else set()
     out = []
     for p in pairs:
