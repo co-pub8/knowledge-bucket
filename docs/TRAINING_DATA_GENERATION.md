@@ -42,7 +42,37 @@ kb search "<ドメインキーワード>" --semantic  # 関連 doc を意味検�
 
 ## 2. 生成の実行
 
-### 基本形
+### 推奨: 1コマンドで完結する `kb sft`
+
+生成 → 全体dedup → シャッフル → train/val分割 → 統計まで一発で済む、SFT 学習データ生成の本来のコマンド。
+
+```bash
+kb sft                                   # 全doc対象・既定値（pairs=5, split=0.95, seed=42）
+kb sft --concept retrieval-augmented-generation --limit 20   # ドメイン絞り込み
+kb sft --pairs 8 --split 0.9 --seed 7    # ペア数・分割比・seed 調整
+```
+
+出力（`.kb/training/sft-dataset/`）:
+
+| ファイル | 役割 |
+|---|---|
+| `all.jsonl` | **追記型の真実の情報源**（生成した全ペア） |
+| `train.jsonl` / `val.jsonl` | all.jsonl から決定的シャッフル＋分割で再導出 |
+| `stats.json` | 件数・難易度分布・出所doc数 |
+| `manifest.jsonl` | 処理済みdoc記録（resume用） |
+
+**resume**: 再実行すると処理済みdocはskipされ、train/valは全ペアを維持（空で上書きされない）。長時間実行が途中で切れても、再度 `kb sft` を打てば続きから再開。新規docを corpus に追加してから再実行すれば差分だけ生成される。
+
+実行例:
+```
+$ kb sft --concept vector-database --pairs 3 --limit 3
+Pairs: 9 (train=8, val=1) from 3 doc(s)
+Difficulty: {'basic': 3, 'intermediate': 3, 'advanced': 3}
+```
+
+### 詳細制御向け: `kb generate`（単一出力・resumeなし）
+
+ドメイン単位で個別の JSONL を書き出したい等の細かい制御向け。`kb sft` の内部で使っているプリミティブ。
 
 ```bash
 kb generate \
