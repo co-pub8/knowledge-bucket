@@ -7,7 +7,8 @@
 
 ## 現在の状況
 
-Phase 1〜12完了。512テスト合格、lint clean。
+Phase 1〜12完了。Phase 13 を計画中（kb sft → fine-tune → 評価のフィードバックループ）。
+512テスト合格、lint clean。
 Phase 8は文書数30万件/repo 5GBまで着手しない。
 
 ---
@@ -318,3 +319,65 @@ knowledge bucket の corpus から SFT（Supervised Fine-Tuning）用の instruc
 - [x] `docs/TRAINING_DATA_GENERATION.md` の playbook で `kb sft` を推奨パスとして明示
 
 **完了基準**: `grep -E "kb (add-video|raw|doctor|watch|sft|generate|index --verify|index --repair)" README.md docs/DESIGN.md` が全ヒットすること。
+
+---
+
+## Phase 13: フィードバックループ — kb sft → fine-tune → 評価 🔄
+
+kb sft で生成した SFT データを使って fine-tune したモデルで kb analyze の品質を測れるようにする。「kb を使って kb を改善する」 closed loop の **計測可能性** を確立する。オーケストレーション（自動反復）は Phase 14 以降。
+
+### 13.1 fine-tune データ変換 + モデル管理 ✅
+
+kb sft が出力した JSONL を任意の fine-tune バックエンドに投入できる形に変換し、生成済みモデルのメタデータを kb 配下で管理する。
+
+- [x] `kb finetune prepare --dataset <all.jsonl> -o <dir> --format <hf|openai|alpaca>`: `kb sft` の `all.jsonl` を各バックエンド向けの形式に変換。`messages` キーの HF datasets 形式 / OpenAI fine-tuning JSONL / alpaca の 3 系統をサポート
+- [x] `kb finetune submit --dataset <dir> --base <model> --backend <transformers|openai|ollama>`: fine-tune ジョブを投入する薄いラッパ。kb-tools 内に学習ループは持たず、`transformers.Trainer` / OpenAI fine-tune API / Ollama 等の **外部ツールに委譲** する。kb は設定・進捗・成果物パスの記録だけを担う
+- [x] `kb models list|show|use <id>`: fine-tune 済みモデルのメタデータ（base model / dataset パス / 完了日 / 評価スコア）を `.kb/models/<id>.json` に保存し一覧・詳細表示
+- [x] `kb config set agent_model <id>` で `kb analyze` / `kb ingest --analyze` の分析モデルを切替。`KB_AGENT_MODEL` 環境変数も対応
+- [x] フォールバック: モデル切替後も `KB_AGENT_PROXY` 経由の呼び出しは維持（OpenAI API 直叩きはしない方針を継続）
+
+**完了基準**: `kb sft` の `all.jsonl` から `kb finetune prepare` で 3 形式（HF / OpenAI / alpaca）のいずれかに変換でき、任意の fine-tune 実行後に `kb models add` で登録 → `kb config set agent_model <id>` で次回の `kb analyze` が新モデルで動作すること。
+
+### 13.2 評価指標の `kb health` 統合 ✅
+
+fine-tune したモデルが「実際に改善したか」を数値で示せるようにする。ground truth を別途用意する代わりに、**既存分析結果 vs 新モデル分析結果の比較** を基本メトリクスとする。
+
+- [x] `kb evaluate --baseline <A> --candidate <B> [--limit N]`: 同じ doc 集合を 2 モデルで分析し、以下を計測
+  - **概念一致率**: Jaccard / F1。`baseline` と `candidate` の `concepts` 集合の overlap
+  - **重要度分布の KL 距離**: `importance` スコアの分布差（baseline からのずれが小さいほど良い）
+  - **要約品質スコア**: LLM-as-a-judge（`KB_AGENT_PROXY` 経由で Sonnet 級に 1–5 評価）。BLEU / ROUGE は corpus 系で弱いため不採用
+  - **失敗率**: JSON 解析失敗 / 空応答 / 必須フィールド欠損の比率
+- [x] 評価レポートを `kb health --models --json` に統合。各モデルの最新スコアを表示し、`kb models show` からも参照可能
+- [x] 評価結果は `baseline / candidate / n_docs / metrics / judged_at` の JSON で `.kb/models/eval/<id>.json` に保存
+- [x] ground truth セット（人手ラベル付き）も `--reference <path>` で受け取り可能。reference があるときは accuracy / macro-F1 を追加で報告
+
+**完了基準**: `kb evaluate` を 2 モデルで実行し、Jaccard / KL / LLM-judge スコア / 失敗率の 4 メトリクスが JSON で出力され、`kb health --models --json` に組み込まれること。テストではモック agent proxy を使いスコア計算ロジックを検証。
+
+### 13.3 フィードバックループ・プレイブック ✅
+
+kb-tools ユーザー（≒ 自社）が Phase 13 を再現するための手順と判断基準を 1 本の文書にまとめる。
+
+- [x] `docs/FEEDBACK_LOOP.md` 作成。以下をカバー:
+  - **典型フロー**: (1) `kb doctor` / `kb health` で corpus 健全性確認 → (2) `kb sft --pairs 5` で N 件 (目安 200〜1000) 生成 → (3) `kb finetune prepare` で形式変換 → (4) 任意の fine-tune ツール (transformers / unsloth / OpenAI / Ollama) で実行 → (5) `kb models add` で登録 → (6) `kb evaluate` でベースライン比較 → (7) 改善が見えれば `kb config set agent_model` で切替
+  - **最初のモデル選定**: Sonnet 級から派生するか haiku 級から派生するかの判断基準（コスト / 品質 / レイテンシ）
+  - **サンプルサイズ**: 「N 件で何が改善できるか」の経験則（小規模 SFT で概念抽出は改善しやすい / 自由生成は改善しにくい 等）
+  - **過学習の兆候**: train 損失 ↓ と val スコア ↓ の乖離、概念の語彙縮退
+  - **撤退基準**: 改善が見られない時の原因切り分け（corpus 品質 / データ量 / ハイパーパラメータ / モデル選定）
+  - **ドッグフーディング**: kb-tools 自社での運用知見を継続的に追記するセクション
+- [x] `docs/TRAINING_DATA_GENERATION.md` から `docs/FEEDBACK_LOOP.md` へ相互リンク
+- [x] `README.md` の「学習データ生成」セクションにフィードバックループ 1 行サマリを追記
+
+**完了基準**: `docs/FEEDBACK_LOOP.md` がリポジトリ直下の docs/ に存在し、FAQ 形式の手順・判断基準・撤退基準が記述されていること。`kb sft` → fine-tune → `kb evaluate` までが既存ユーザーだけで再現可能であること。
+
+---
+
+## 次のフェーズ候補（Phase 14 以降）
+
+Phase 13 で計測可能性が確立した後、自然な候補:
+
+- **Phase 14: 自動反復オーケストレーション** — `kb improve --iterations N` で「再分析 → SFT 再生成 → fine-tune → 評価」を自動ループ。改善が見られれば commit、なければ中断
+- **Phase 15: 配布・採用拡大** — PyPI 公開、blog、demo、Phase 13 を Example として確立
+- **Phase 8 着手** — corpus が 30 万文書 / 5 GB に達した時点で 16 shard 分割・一括再分析・スパム対策
+- **Web UI 強化** — `kb serve` を Next.js 化、グラフ可視化、共同編集
+- **マルチモーダル拡張** — 動画の文字起こし (Whisper) / PDF 図 OCR / `add-image` / `add-audio`
+
