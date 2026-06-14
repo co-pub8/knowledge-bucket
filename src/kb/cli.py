@@ -25,6 +25,7 @@ from .core import (
     DOC_DIR,
     RECORDS_DIR,
     ensure_dirs,
+    ensure_models_dirs,
     generate_ulid,
     kb_root,
     shard_path,
@@ -62,6 +63,7 @@ def init(path: str):
         raise SystemExit(1)
 
     ensure_dirs(target)
+    ensure_models_dirs(target)
 
     with open(cfg_path, "w") as f:
         f.write(DEFAULT_CONFIG)
@@ -1440,6 +1442,372 @@ def serve(host: str, port: int, debug: bool):
     app = create_app(root)
     click.echo(f"Starting Knowledge Bucket UI at http://{host}:{port}")
     app.run(host=host, port=port, debug=debug)
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuning (Phase 13.1)
+# ---------------------------------------------------------------------------
+
+@main.command("finetune")
+@click.argument("subcommand", default="prepare")
+@click.option("--dataset", "-d", default=None,
+              help="Source JSONL (default: .kb/training/sft-dataset/train.jsonl)")
+@click.option("--output", "-o", default=None,
+              help="Output JSONL path (default: <source-stem>.<fmt>.jsonl next to source)")
+@click.option("--format", "fmt", default="hf", show_default=True,
+              type=click.Choice(["hf", "openai", "alpaca"]),
+              help="Output format: hf (HF datasets), openai (OpenAI fine-tune JSONL), alpaca")
+# submit-only options (ignored by prepare)
+@click.option("--base-model", default="claude-opus-4-7", show_default=True,
+              help="[submit] Upstream model id to fine-tune from")
+@click.option("--backend", default="openai_ft", show_default=True,
+              type=click.Choice(["openai_ft", "local_lora", "unsloth", "external"]),
+              help="[submit] Training backend")
+@click.option("--output-model-id", default=None,
+              help="[submit] Slug for the model you'll register once training finishes")
+@click.option("--epochs", type=int, default=3, show_default=True, help="[submit] Training epochs")
+@click.option("--lr", type=float, default=5e-6, show_default=True, help="[submit] Learning rate")
+@click.option("--batch-size", type=int, default=8, show_default=True, help="[submit] Batch size")
+@click.option("--lora/--no-lora", default=True, show_default=True, help="[submit] Use LoRA")
+@click.option("--lora-r", type=int, default=16, show_default=True, help="[submit] LoRA rank")
+@click.option("--notes", default="", help="[submit] Free-form notes stored in job.json")
+def finetune_cmd(subcommand, dataset, output, fmt, base_model, backend,
+                 output_model_id, epochs, lr, batch_size, lora, lora_r, notes):
+    """Prepare fine-tuning datasets or record a training job.
+
+    Subcommands: prepare, submit. Reads ``kb sft`` output (or any
+    openai-format JSONL) and writes a converted JSONL suitable for
+    transformers.Trainer (hf), OpenAI fine-tuning jobs (openai), or
+    Alpaca-style trainers (alpaca). The ``submit`` subcommand records a
+    training run under ``.kb/finetune/<job_id>/``; the actual training
+    call is delegated to an external system.
+    """
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import finetune as ft
+
+    if subcommand == "submit":
+        if not output_model_id:
+            click.echo("Error: --output-model-id is required for 'submit'",
+                       err=True)
+            raise SystemExit(2)
+        ds_path = dataset or os.path.join(
+            root, ".kb", "training", "sft-dataset", "train.jsonl")
+        if not os.path.exists(ds_path):
+            click.echo(f"Error: dataset not found: {ds_path}", err=True)
+            raise SystemExit(1)
+        # Make sure the job dir exists. ``ensure_models_dirs`` covers both
+        # .kb/models and .kb/finetune — fine-tuning uses the latter.
+        ensure_models_dirs(root)
+        hp = {"n_epochs": epochs, "lr": lr, "batch_size": batch_size,
+              "lora": lora, "lora_r": lora_r}
+        try:
+            res = ft.submit(
+                ds_path, base_model, backend,
+                output_model_id=output_model_id, hyperparams=hp,
+                notes=notes, root=root,
+            )
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(1)
+        click.echo(f"Recorded job: {res['job_id']}")
+        click.echo(f"  workdir:   {res['workdir']}")
+        click.echo(f"  dataset:   {res['dataset_path']}")
+        click.echo(f"  base:      {res['base_model']}  backend: {res['backend']}")
+        click.echo(f"  output:    {res['output_model_id']}")
+        click.echo(f"  hint:      {res['command_hint']}")
+        click.echo("  next:      once training finishes, run:")
+        click.echo(f"             kb models add {res['output_model_id']} "
+                   f"--base-model {res['base_model']} "
+                   f"--backend {res['backend']} "
+                   f"--from-job {res['job_id']}")
+        return
+
+    if subcommand != "prepare":
+        click.echo(
+            f"Unknown finetune subcommand: {subcommand}. "
+            f"Use 'prepare' or 'submit'.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    ds_path = dataset or os.path.join(
+        root, ".kb", "training", "sft-dataset", "train.jsonl")
+    if not os.path.exists(ds_path):
+        click.echo(f"Error: dataset not found: {ds_path}", err=True)
+        click.echo("Run 'kb sft' first to produce a dataset, or pass --dataset.",
+                   err=True)
+        raise SystemExit(1)
+
+    out_path = output
+    if not out_path:
+        stem, _ = os.path.splitext(os.path.basename(ds_path))
+        if not stem:
+            stem = "dataset"
+        parent = os.path.dirname(ds_path) or "."
+        out_path = os.path.join(parent, f"{stem}.{fmt}.jsonl")
+    out_dir = os.path.dirname(out_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        report = ft.prepare(ds_path, out_dir, fmt)
+    except (ValueError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Converted {report['count']} record(s) -> {fmt} format")
+    click.echo(f"  output:    {report['output_path']}")
+    if report.get("had_meta"):
+        click.echo("  (dropped kb-specific metadata fields; see finetune.prepare docs)")
+
+
+# ---------------------------------------------------------------------------
+# Model registry (Phase 13.1)
+# ---------------------------------------------------------------------------
+
+@main.command("models")
+@click.argument("subcommand", default="list")
+@click.argument("model_id", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of table (for list/show)")
+@click.option("--tag", default=None, help="Filter by tag (for list)")
+# add-only options
+@click.option("--base-model", "add_base_model", default=None,
+              help="[add] Upstream model id (required unless --from-job is set)")
+@click.option("--backend", "add_backend", default="external", show_default=True,
+              type=click.Choice(["openai_ft", "local_lora", "unsloth", "external"]),
+              help="[add] Training backend")
+@click.option("--dataset", "add_dataset", default=None,
+              help="[add] Path to dataset "
+                   "(default: .kb/training/sft-dataset/train.jsonl)")
+@click.option("--display-name", default="", help="[add] Human-readable label")
+@click.option("--provider-model-id", default="",
+              help="[add] Provider-returned model id (e.g. ft:...)")
+@click.option("--provider-job-id", default="", help="[add] Provider-returned job id")
+@click.option("--notes", default="", help="[add] Free-form notes")
+@click.option("--tag-add", "tags", multiple=True, help="[add] Repeatable tag")
+@click.option("--from-job", "from_job", default=None,
+              help="[add] Pre-fill fields from .kb/finetune/<job_id>/job.json")
+@click.option("--overwrite", is_flag=True, help="[add] Replace an existing model with the same id")
+def models_cmd(subcommand, model_id, as_json, tag, add_base_model,
+               add_backend, add_dataset, display_name,
+               provider_model_id, provider_job_id, notes, tags,
+               from_job, overwrite):
+    """Manage registered fine-tuned models.
+
+    Subcommands: list, show, use, add. ``list`` shows every registered
+    model. ``show <id>`` prints the full record. ``use <id>`` writes
+    ``agent_model: <id>`` to config/kb.yml. ``add`` registers a model
+    trained outside of kb (with optional ``--from-job <job_id>`` to
+    inherit base_model/backend/hyperparams from a recorded finetune run).
+    """
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import models as registry
+
+    if subcommand == "list":
+        recs = registry.list_all(root=root, tag=tag)
+        if as_json:
+            click.echo(json.dumps(recs, ensure_ascii=False, indent=2))
+            return
+        if not recs:
+            click.echo("No models registered. Run 'kb models add' to register one.")
+            return
+        active = registry.get_default(root=root)
+        active_id = active["id"] if active else None
+        click.echo(f"{'ID':<24}{'BASE MODEL':<28}{'BACKEND':<14}CREATED")
+        for r in recs:
+            mark = "*" if r.get("id") == active_id else " "
+            click.echo(
+                f"{mark} {r.get('id',''):<22}"
+                f"{r.get('base_model',''):<28}"
+                f"{r.get('backend',''):<14}"
+                f"{r.get('created_at','')}"
+            )
+        if active_id:
+            click.echo(f"(active = {active_id})")
+        return
+
+    if subcommand == "show":
+        if not model_id:
+            click.echo("Usage: kb models show <id>", err=True)
+            raise SystemExit(2)
+        rec = registry.show(model_id, root=root)
+        if rec is None:
+            click.echo(
+                f"Model not found: {model_id} "
+                f"(run 'kb models list' to see registered models)",
+                err=True,
+            )
+            raise SystemExit(1)
+        if as_json:
+            click.echo(json.dumps(rec, ensure_ascii=False, indent=2))
+        else:
+            for k in ("id", "display_name", "base_model", "backend",
+                      "dataset_path", "provider_model_id", "provider_job_id",
+                      "created_at", "updated_at", "notes"):
+                if k in rec and rec[k] not in (None, "", []):
+                    click.echo(f"{k}: {rec[k]}")
+            tags_list = rec.get("tags") or []
+            if tags_list:
+                click.echo(f"tags: {', '.join(tags_list)}")
+        return
+
+    if subcommand == "use":
+        if not model_id:
+            click.echo("Usage: kb models use <id>", err=True)
+            raise SystemExit(2)
+        try:
+            registry.use(model_id, root=root)
+        except FileNotFoundError as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(1)
+        click.echo(f"Active model: {model_id}  (file: {CONFIG_DIR}/{CONFIG_FILENAME})")
+        return
+
+    if subcommand == "add":
+        if not model_id:
+            click.echo("Usage: kb models add <id> --base-model <m> ...", err=True)
+            raise SystemExit(2)
+        ds_path = add_dataset or ".kb/training/sft-dataset/train.jsonl"
+        hp = None
+        backend = add_backend
+        base_model = add_base_model or ""
+        # If --from-job is set, pre-fill from the recorded job; CLI flags
+        # override the job defaults when explicitly provided.
+        if from_job is not None:
+            job_path = os.path.join(root, ".kb", "finetune", from_job, "job.json")
+            if not os.path.exists(job_path):
+                click.echo(f"Error: finetune job not found: {from_job}", err=True)
+                raise SystemExit(1)
+            with open(job_path, encoding="utf-8") as f:
+                job = json.load(f)
+            if not base_model:
+                base_model = job.get("base_model", "")
+            if not add_dataset:
+                ds_path = (job.get("dataset") or {}).get("path", ds_path)
+            hp = job.get("hyperparams") or None
+            if not notes:
+                notes = job.get("notes", "")
+        if not base_model:
+            click.echo(
+                "Error: --base-model is required (or use --from-job <job_id>)",
+                err=True,
+            )
+            raise SystemExit(2)
+        try:
+            extra: dict = {}
+            if hp:
+                extra["hyperparams"] = hp
+            rec = registry.add(
+                model_id, base_model=base_model, dataset_path=ds_path,
+                backend=backend, notes=notes, root=root, overwrite=overwrite,
+                display_name=display_name,
+                provider_model_id=provider_model_id,
+                provider_job_id=provider_job_id, tags=list(tags),
+                extra=extra or None,
+            )
+        except (ValueError, FileNotFoundError) as e:
+            click.echo(f"Error: {e}", err=True)
+            raise SystemExit(1)
+        click.echo(
+            f"Registered model {rec['id']!r} -> "
+            f"{os.path.join(root, '.kb', 'models', rec['id'] + '.json')}"
+        )
+        return
+
+    click.echo(
+        f"Unknown models subcommand: {subcommand}. "
+        f"Use 'list'/'show'/'use'/'add'.",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Config (Phase 13.1)
+# ---------------------------------------------------------------------------
+
+@main.command("config")
+@click.argument("subcommand", default="get")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+def config_cmd(subcommand, key, value):
+    """Read or write config/kb.yml.
+
+    Subcommands: get, set, unset. Scalar string values only for 13.1.
+    Setting ``agent_model`` validates the id is registered; use
+    ``kb models add`` first if it is not.
+
+    Examples:
+
+      kb config get agent_model
+
+      kb config set agent_model kb-domain-v1
+
+      kb config unset agent_model
+    """
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from .core import AGENT_MODEL_KEY, get_config_value, set_config_value
+
+    if subcommand == "get":
+        if not key:
+            click.echo("Usage: kb config get <key>", err=True)
+            raise SystemExit(2)
+        v = get_config_value(root, key, default="")
+        if v in (None, ""):
+            click.echo(f"(unset) {key}")
+        else:
+            click.echo(v)
+        return
+
+    if subcommand == "set":
+        if not (key and value is not None):
+            click.echo("Usage: kb config set <key> <value>", err=True)
+            raise SystemExit(2)
+        # Validation hook: agent_model must be a registered model id.
+        if key == AGENT_MODEL_KEY and value:
+            from . import models as registry
+            ids = {m["id"] for m in registry.list_all(root=root)}
+            if value not in ids:
+                click.echo(
+                    f"Error: model {value!r} is not registered. "
+                    f"Run 'kb models add' first, or "
+                    f"'kb config unset {AGENT_MODEL_KEY}' to clear.",
+                    err=True,
+                )
+                raise SystemExit(1)
+        try:
+            set_config_value(root, key, value)
+        except OSError as e:
+            click.echo(f"Error writing config: {e}", err=True)
+            raise SystemExit(1)
+        click.echo(f"{key} = {value}")
+        return
+
+    if subcommand == "unset":
+        if not key:
+            click.echo("Usage: kb config unset <key>", err=True)
+            raise SystemExit(2)
+        set_config_value(root, key, "")
+        click.echo(f"{key} = (unset)")
+        return
+
+    click.echo(
+        f"Unknown config subcommand: {subcommand}. "
+        f"Use 'get'/'set'/'unset'.",
+        err=True,
+    )
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

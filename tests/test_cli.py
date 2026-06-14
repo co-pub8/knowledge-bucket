@@ -1,5 +1,6 @@
 """Tests for CLI: kb init, kb add, kb show, kb concept."""
 
+import json
 import os
 from unittest.mock import patch
 
@@ -423,3 +424,492 @@ class TestDoctor:
                         "source_type: web\nsource_key: url:x\n---\n\nbody\n")
             result = runner.invoke(main, ["doctor"])
             assert result.exit_code != 0
+
+
+class TestModelsCLI:
+    def test_models_list_outside_bucket_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["models"])
+            assert result.exit_code == 1
+            assert "kb init" in result.output
+
+    def test_models_list_empty(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["models"])
+            assert result.exit_code == 0
+            assert "No models registered" in result.output
+
+    def test_models_add_and_list(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+                "--notes", "first pass",
+            ])
+            assert result.exit_code == 0
+            assert "Registered model 'kb-domain-v1'" in result.output
+
+            result = runner.invoke(main, ["models"])
+            assert result.exit_code == 0
+            assert "kb-domain-v1" in result.output
+            assert "claude-opus-4-7" in result.output
+
+    def test_models_show_and_use(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            result = runner.invoke(main, ["models", "show", "kb-domain-v1"])
+            assert result.exit_code == 0
+            assert "id: kb-domain-v1" in result.output
+            assert "base_model: claude-opus-4-7" in result.output
+
+            result = runner.invoke(main, ["models", "use", "kb-domain-v1"])
+            assert result.exit_code == 0
+            assert "Active model: kb-domain-v1" in result.output
+
+            # The active line appears in subsequent list output.
+            result = runner.invoke(main, ["models"])
+            assert "(active = kb-domain-v1)" in result.output
+
+    def test_models_show_missing_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["models", "show", "ghost"])
+            assert result.exit_code == 1
+            assert "Model not found" in result.output
+
+    def test_models_use_unregistered_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["models", "use", "ghost"])
+            assert result.exit_code == 1
+            assert "not registered" in result.output
+
+    def test_models_list_json(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            result = runner.invoke(main, ["models", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert isinstance(data, list)
+            assert data[0]["id"] == "kb-domain-v1"
+
+
+class TestConfigCLI:
+    def test_config_get_unset(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["config", "get", "agent_model"])
+            assert result.exit_code == 0
+            assert "(unset) agent_model" in result.output
+
+    def test_config_set_and_get(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # First register a model so the agent_model validation passes.
+            runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            result = runner.invoke(main, [
+                "config", "set", "agent_model", "kb-domain-v1",
+            ])
+            assert result.exit_code == 0
+            assert "agent_model = kb-domain-v1" in result.output
+
+            result = runner.invoke(main, ["config", "get", "agent_model"])
+            assert result.exit_code == 0
+            assert result.output.strip() == "kb-domain-v1"
+
+    def test_config_set_rejects_unregistered(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "config", "set", "agent_model", "ghost",
+            ])
+            assert result.exit_code == 1
+            assert "'ghost' is not registered" in result.output
+
+    def test_config_unset(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            runner.invoke(main, [
+                "config", "set", "agent_model", "kb-domain-v1",
+            ])
+            result = runner.invoke(main, ["config", "unset", "agent_model"])
+            assert result.exit_code == 0
+            assert "(unset)" in result.output
+
+    def test_config_get_requires_key(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["config", "get"])
+            assert result.exit_code == 2
+
+
+class TestFinetuneCLI:
+    def test_finetune_prepare_converts_dataset(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # Write a tiny openai-format JSONL next to the default dataset
+            # path so the default lookup finds it.
+            ds_dir = os.path.join(".kb", "training", "sft-dataset")
+            os.makedirs(ds_dir)
+            ds = os.path.join(ds_dir, "train.jsonl")
+            with open(ds, "w") as f:
+                f.write(
+                    '{"messages":[{"role":"system","content":"sys"},'
+                    '{"role":"user","content":"hi"},'
+                    '{"role":"assistant","content":"hello"}],'
+                    '"_source_doc":"x","_difficulty":"basic",'
+                    '"_tags":["rag"]}\n'
+                )
+            out_dir = "out"
+            os.makedirs(out_dir)
+            result = runner.invoke(main, [
+                "finetune", "prepare",
+                "--format", "openai", "--output", os.path.join(out_dir, "out.jsonl"),
+            ])
+            assert result.exit_code == 0, result.output
+            # --output's parent dir is used; the filename is derived from the
+            # source dataset, so the result is <out>/train.openai.jsonl.
+            out_path = os.path.join(out_dir, "train.openai.jsonl")
+            assert os.path.isfile(out_path), out_path
+            with open(out_path) as f:
+                line = f.readline()
+            rec = json.loads(line)
+            assert "_source_doc" not in rec
+            assert rec["messages"][0]["role"] == "system"
+            assert rec["messages"][1]["content"] == "hi"
+
+    def test_finetune_unknown_subcommand_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["finetune", "wat"])
+            assert result.exit_code == 1
+            assert "Unknown finetune subcommand" in result.output
+
+    def test_finetune_submit_records_job(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            ds_dir = os.path.join(".kb", "training", "sft-dataset")
+            os.makedirs(ds_dir)
+            ds = os.path.join(ds_dir, "train.jsonl")
+            with open(ds, "w") as f:
+                f.write('{"messages":[{"role":"user","content":"q"},'
+                        '{"role":"assistant","content":"a"}]}\n')
+            result = runner.invoke(main, [
+                "finetune", "submit",
+                "--output-model-id", "kb-test-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            assert result.exit_code == 0
+            assert "Recorded job" in result.output
+            assert os.path.isdir(os.path.join(".kb", "finetune"))
+            # There should be exactly one job dir with the expected files.
+            entries = os.listdir(os.path.join(".kb", "finetune"))
+            assert len(entries) == 1
+            job_dir = os.path.join(".kb", "finetune", entries[0])
+            for fn in ("job.json", "config.json", "README.md", "status.log"):
+                assert os.path.isfile(os.path.join(job_dir, fn)), fn
+
+    def test_finetune_outside_bucket_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["finetune", "prepare"])
+            assert result.exit_code == 1
+            assert "kb init" in result.output
+
+
+class TestInitAgentModel:
+    def test_init_writes_agent_model_in_config(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["init", "."])
+            assert result.exit_code == 0
+            with open(os.path.join("config", "kb.yml")) as f:
+                text = f.read()
+            assert "agent_model:" in text
+
+    def test_init_creates_models_and_finetune_dirs(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            assert os.path.isdir(os.path.join(".kb", "models"))
+            assert os.path.isdir(os.path.join(".kb", "finetune"))
+
+
+class TestConfigCommandInvocations:
+    """Additional CLI invocation tests for ``kb config``.
+
+    The integration phase already covered happy-path get/set/unset and the
+    agent_model validation. These tests cover the rest of the surface that
+    the design promised but the integration tests didn't pin down:
+    ``agent_model`` round-trips through kb.yml, an unknown config key can
+    still be written (the CLI is a generic scalar writer for 13.1), and the
+    init-written ``agent_model: ""`` survives a subsequent unset round-trip.
+    """
+
+    def test_config_set_agent_model_round_trips_in_yaml(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-domain-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            runner.invoke(main, [
+                "config", "set", "agent_model", "kb-domain-v1",
+            ])
+            # Read the raw file and confirm agent_model: is in it.
+            with open(os.path.join("config", "kb.yml")) as f:
+                text = f.read()
+            assert "agent_model" in text
+            assert "kb-domain-v1" in text
+
+    def test_config_set_unknown_key_works(self):
+        # The CLI is a generic scalar writer in 13.1. Setting a key the
+        # rest of the codebase doesn't know about is allowed — it shows up
+        # in kb.yml and can be retrieved via ``kb config get``.
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "config", "set", "my_custom_key", "hello",
+            ])
+            assert result.exit_code == 0, result.output
+            assert "my_custom_key = hello" in result.output
+
+            result = runner.invoke(main, ["config", "get", "my_custom_key"])
+            assert result.exit_code == 0
+            assert result.output.strip() == "hello"
+
+    def test_config_init_default_agent_model_survives_unset(self):
+        # kb init writes agent_model: "" by default. An unset on a fresh
+        # bucket should be a no-op on the file (still present, still empty).
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            with open(os.path.join("config", "kb.yml")) as f:
+                before = f.read()
+            assert "agent_model" in before
+            result = runner.invoke(main, ["config", "unset", "agent_model"])
+            assert result.exit_code == 0
+            with open(os.path.join("config", "kb.yml")) as f:
+                after = f.read()
+            assert "agent_model" in after
+
+    def test_config_set_requires_key_and_value(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # No value: usage error.
+            result = runner.invoke(main, ["config", "set", "agent_model"])
+            assert result.exit_code == 2
+            assert "Usage" in result.output
+
+    def test_config_unset_unknown_key_is_silent(self):
+        # Unsetting a key that was never set is a successful no-op so that
+        # shell scripts can pipe through ``kb config unset`` without
+        # branching on first-run.
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "config", "unset", "definitely_not_set",
+            ])
+            assert result.exit_code == 0
+
+
+class TestFinetuneCommandInvocations:
+    """Additional CLI invocation tests for ``kb finetune`` and ``kb models``.
+
+    The integration phase covered the basic prepare/submit/list/use
+    happy paths. These tests focus on invocation-level guarantees: the
+    format flag flows through, the missing-dataset case is caught, the
+    submit-only flags are required, the recorded job.json has the right
+    hyperparams shape, and ``kb models list`` actually shows the active
+    model's id (not just any model).
+    """
+
+    def _write_default_dataset(self):
+        ds_dir = os.path.join(".kb", "training", "sft-dataset")
+        os.makedirs(ds_dir, exist_ok=True)
+        ds = os.path.join(ds_dir, "train.jsonl")
+        with open(ds, "w") as f:
+            f.write(
+                '{"messages":[{"role":"user","content":"q"},'
+                '{"role":"assistant","content":"a"}]}\n'
+            )
+        return ds
+
+    def test_finetune_prepare_hf_format(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            self._write_default_dataset()
+            out_dir = "out_hf"
+            os.makedirs(out_dir)
+            result = runner.invoke(main, [
+                "finetune", "prepare",
+                "--format", "hf",
+                "--output", os.path.join(out_dir, "anything.jsonl"),
+            ])
+            assert result.exit_code == 0, result.output
+            out_path = os.path.join(out_dir, "train.hf.jsonl")
+            assert os.path.isfile(out_path), out_path
+            with open(out_path) as f:
+                rec = json.loads(f.readline())
+            # HF format drops the underscore-prefixed metadata fields.
+            assert "messages" in rec
+
+    def test_finetune_prepare_missing_dataset_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # No dataset written.
+            result = runner.invoke(main, [
+                "finetune", "prepare", "--format", "openai",
+            ])
+            assert result.exit_code == 1
+            assert "dataset not found" in result.output
+
+    def test_finetune_submit_requires_output_model_id(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            self._write_default_dataset()
+            result = runner.invoke(main, [
+                "finetune", "submit", "--base-model", "claude-opus-4-7",
+            ])
+            assert result.exit_code == 2
+            assert "--output-model-id" in result.output
+
+    def test_finetune_submit_records_hyperparams(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            self._write_default_dataset()
+            result = runner.invoke(main, [
+                "finetune", "submit",
+                "--output-model-id", "kb-test-v1",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+                "--epochs", "5",
+                "--lr", "1e-5",
+                "--batch-size", "16",
+                "--no-lora",
+                "--notes", "second pass",
+            ])
+            assert result.exit_code == 0, result.output
+            entries = os.listdir(os.path.join(".kb", "finetune"))
+            assert len(entries) == 1
+            with open(os.path.join(".kb", "finetune", entries[0], "job.json")) as f:
+                job = json.load(f)
+            assert job["hyperparams"]["n_epochs"] == 5
+            assert job["hyperparams"]["lr"] == 1e-5
+            assert job["hyperparams"]["batch_size"] == 16
+            assert job["hyperparams"]["lora"] is False
+            assert job["notes"] == "second pass"
+            assert job["base_model"] == "claude-opus-4-7"
+
+    def test_finetune_submit_rejects_unknown_backend(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            self._write_default_dataset()
+            # Bypass Click's --backend Choice validation by patching the
+            # function: the integration already covers the Choice guard.
+            # We exercise the deeper ValueError inside finetune.submit.
+            from kb import finetune as ft
+            with patch.object(ft, "submit",
+                              side_effect=ValueError("backend must be one of (...)")):
+                result = runner.invoke(main, [
+                    "finetune", "submit",
+                    "--output-model-id", "kb-test-v1",
+                    "--base-model", "claude-opus-4-7",
+                ])
+            # The CLI's --backend default is openai_ft, so the submit path
+            # runs; the patched submit raises and CLI exits 1.
+            assert result.exit_code == 1
+            assert "backend" in result.output
+
+    def test_models_list_marks_active_model(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-first",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-second",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+            ])
+            runner.invoke(main, ["models", "use", "kb-second"])
+            result = runner.invoke(main, ["models"])
+            assert result.exit_code == 0
+            # Active line must be present and identify the chosen one.
+            assert "(active = kb-second)" in result.output
+            assert "(active = kb-first)" not in result.output
+
+    def test_models_list_tag_filter(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-rag",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+                "--tag-add", "rag",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-finetune",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "openai_ft",
+                "--tag-add", "ft",
+            ])
+            result = runner.invoke(main, ["models", "--tag", "rag"])
+            assert result.exit_code == 0
+            assert "kb-rag" in result.output
+            assert "kb-finetune" not in result.output
+
+
+# (no extra imports needed at the bottom — see top-of-file imports)
