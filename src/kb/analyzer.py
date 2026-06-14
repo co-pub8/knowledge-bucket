@@ -231,6 +231,12 @@ def build_front_matter_update(analysis: AnalysisResult, ulid: str,
 logger = logging.getLogger(__name__)
 
 _AGENT_PROXY_ENV = "KB_AGENT_PROXY"
+# Model selection for the agent proxy.
+# Precedence: KB_AGENT_MODEL env > config/kb.yml agent_model > proxy default.
+# The env var bypasses registry validation by design — it lets users pass
+# raw upstream model ids (e.g. "claude-opus-4-7") that the proxy already
+# understands without forcing a registration round-trip.
+_AGENT_MODEL_ENV = "KB_AGENT_MODEL"
 _PROXY_CANDIDATES = [
     os.path.expanduser("~/ai-hub_agent_proxy/dist/cli.js"),
     "/opt/ai-hub_agent_proxy/dist/cli.js",
@@ -260,13 +266,59 @@ def get_api_key() -> str | None:
     return agent_proxy_bin()
 
 
-def call_agent(prompt: str, *, timeout_sec: int = 3600) -> str:
+def _resolve_model_from_config() -> str | None:
+    """Resolve the agent model from env > config/kb.yml > None.
+
+    Returns:
+        The model id string to pass to the proxy as ``--model``, or
+        ``None`` when no model is configured. The env var wins
+        unconditionally (no registry check — the proxy may accept raw
+        upstream ids the registry doesn't know about). The config value
+        is resolved via ``models.get_default`` which validates against
+        the registry and treats a dangling config as "no model set" (a
+        warning is logged inside ``get_default``).
+
+    The imports are lazy to avoid a circular dependency at module import
+    time (analyzer has no other reason to depend on models; models does
+    not import analyzer).
+    """
+    env = os.environ.get(_AGENT_MODEL_ENV, "").strip()
+    if env:
+        return env
+    try:
+        from .core import kb_root
+        root = kb_root()
+    except Exception:
+        return None
+    if root is None:
+        return None
+    try:
+        from . import models as _models
+        rec = _models.get_default(root=root)
+    except Exception as e:  # noqa: BLE001 — never block analysis on a model lookup
+        logger.debug("model resolution skipped: %s", e)
+        return None
+    if not rec:
+        return None
+    return rec.get("base_model") or rec.get("id")
+
+
+def call_agent(prompt: str, *, timeout_sec: int = 3600, model: str | None = None) -> str:
     """Run the analysis prompt through ai-hub-agent-proxy and return stdout.
 
-    Spawns `node <proxy>/dist/cli.js --quiet --timeout N -p <prompt>`. The proxy
-    runs Claude Code (primary) with OpenCode fallback; secrets stay in the
-    proxy's own .env. Default 1h timeout — LLM analysis of large documents can
-    take many minutes. Retries on transient exit codes.
+    Spawns `node <proxy>/dist/cli.js --quiet [--model <id>] --timeout N -p <prompt>`.
+    The proxy runs Claude Code (primary) with OpenCode fallback; secrets stay in
+    the proxy's own .env. Default 1h timeout — LLM analysis of large documents
+    can take many minutes. Retries on transient exit codes.
+
+    Args:
+        prompt: The analysis prompt to send to the agent.
+        timeout_sec: How long the proxy may run before being killed.
+        model: Optional model id. When unset, resolution is:
+            ``KB_AGENT_MODEL`` env > ``config/kb.yml`` agent_model > proxy
+            default. The flag is added to the proxy invocation only when a
+            model is set, so today's proxy (which does not parse --model)
+            keeps working unchanged.
     """
     proxy = agent_proxy_bin()
     if not proxy:
@@ -277,9 +329,15 @@ def call_agent(prompt: str, *, timeout_sec: int = 3600) -> str:
     if not node:
         raise RuntimeError("node executable not found on PATH")
 
+    if model is None:
+        model = _resolve_model_from_config()
+
     # Give the proxy itself the same budget so its own SIGTERM grace window
     # aligns with our subprocess timeout. subprocess timeout is +60s headroom.
-    cmd = [node, proxy, "--quiet", "--timeout", str(timeout_sec), "-p", prompt]
+    cmd = [node, proxy, "--quiet", "--timeout", str(timeout_sec)]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["-p", prompt]
     subproc_timeout = timeout_sec + 60
     last_err = ""
     for attempt in range(_MAX_RETRIES + 1):

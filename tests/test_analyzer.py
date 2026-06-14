@@ -277,6 +277,67 @@ class TestCallAgent:
         assert "--timeout" in cmd
         assert "120" in cmd
 
+    def test_explicit_model_kwarg_adds_model_flag(self):
+        completed = CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run:
+            call_agent("p", model="claude-opus-4-7")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-opus-4-7"
+
+    def test_env_var_model_is_added_when_no_kwarg(self):
+        completed = CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {"KB_AGENT_MODEL": "env-model"}):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "env-model"
+
+    def test_no_model_means_no_model_flag(self):
+        completed = CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        # Make sure neither the env var nor the config can supply a model.
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("kb.core.kb_root", return_value=None):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" not in cmd
+
+    def test_config_model_is_resolved(self, tmp_path):
+        # Register a model and set it as active; ensure the proxy gets
+        # the base_model field as --model.
+        from kb import models as registry
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\nagent_model: my-tuned\n")
+        with patch("kb.models.kb_root", return_value=root):
+            registry.add(
+                "my-tuned", base_model="claude-opus-4-7-tuned",
+                dataset_path="d", backend="openai_ft", root=root,
+            )
+            registry.use("my-tuned", root=root)
+        completed = CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("kb.core.kb_root", return_value=root):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-opus-4-7-tuned"
+
 
 class TestGetApiKey:
     def test_returns_proxy_path_when_available(self):
@@ -480,3 +541,147 @@ class TestFindDocsWithoutAnalysis:
 
             results = find_docs_without_analysis(tmp)
             assert len(results) == 0
+
+
+class TestModelResolutionPrecedence:
+    """Integration tests for the analyzer's model-resolution chain.
+
+    The precedence is: ``KB_AGENT_MODEL`` env > ``config/kb.yml`` agent_model
+    > proxy default. The first three tests walk the chain in both directions;
+    the dangling-config test covers the "config says X but X is unregistered"
+    failure mode; the outside-bucket test confirms we don't crash on missing
+    bucket state. The kwarg test confirms an explicit call_agent(..., model=)
+    bypasses the chain entirely.
+    """
+
+    def test_env_var_overrides_config(self, tmp_path):
+        from kb import models as registry
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\nagent_model: cfg-model\n")
+        with patch("kb.models.kb_root", return_value=root):
+            registry.add(
+                "cfg-model", base_model="claude-from-config",
+                dataset_path="d", backend="openai_ft", root=root,
+            )
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {"KB_AGENT_MODEL": "env-wins"}, clear=True), \
+             patch("kb.core.kb_root", return_value=root):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        idx = cmd.index("--model")
+        # Env wins: the env value is forwarded verbatim, not the registry's
+        # base_model. This is the power-user escape hatch the design specifies.
+        assert cmd[idx + 1] == "env-wins"
+
+    def test_config_used_when_env_unset(self, tmp_path):
+        from kb import models as registry
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\nagent_model: cfg-only\n")
+        with patch("kb.models.kb_root", return_value=root):
+            registry.add(
+                "cfg-only", base_model="claude-from-cfg",
+                dataset_path="d", backend="openai_ft", root=root,
+            )
+            registry.use("cfg-only", root=root)
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("kb.core.kb_root", return_value=root):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        # Config wins: the proxy gets base_model from the registry record,
+        # not the id, because that's the upstream id the proxy needs.
+        assert cmd[idx + 1] == "claude-from-cfg"
+
+    def test_no_model_when_neither_env_nor_config_set(self, tmp_path):
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        # kb.yml has no agent_model key at all.
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\n")
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("kb.core.kb_root", return_value=root):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" not in cmd
+
+    def test_dangling_config_warns_and_falls_through(self, tmp_path, caplog):
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\nagent_model: ghost\n")
+        # 'ghost' is not registered. Resolution must:
+        #   (a) log a warning, and
+        #   (b) return None, so the proxy sees no --model.
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with caplog.at_level("WARNING"):
+            with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+                 patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+                 patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+                 patch.dict(os.environ, {}, clear=True), \
+                 patch("kb.core.kb_root", return_value=root):
+                call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" not in cmd
+        # The warning came from models.get_default; just check both signals
+        # are present somewhere in the captured records.
+        joined = " ".join(rec.message for rec in caplog.records)
+        assert "ghost" in joined or "agent_model" in joined
+
+    def test_outside_bucket_means_no_model_flag(self):
+        # When we're not in a bucket, kb_root() is None. The analyzer must
+        # not crash; it should simply omit --model.
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("kb.core.kb_root", return_value=None):
+            call_agent("p")
+        cmd = mock_run.call_args.args[0]
+        assert "--model" not in cmd
+
+    def test_explicit_kwarg_bypasses_resolution(self, tmp_path):
+        # When the caller passes model=... explicitly, neither env nor config
+        # is consulted. The kwarg value is forwarded verbatim to the proxy.
+        root = str(tmp_path)
+        os.makedirs(os.path.join(root, "config"))
+        with open(os.path.join(root, "config", "kb.yml"), "w") as f:
+            f.write("records_dir: records\nagent_model: cfg-model\n")
+        completed = CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr="",
+        )
+        with patch("kb.analyzer.agent_proxy_bin", return_value="/fake/proxy.js"), \
+             patch("kb.analyzer.shutil.which", return_value="/usr/bin/node"), \
+             patch("kb.analyzer.subprocess.run", return_value=completed) as mock_run, \
+             patch.dict(os.environ, {"KB_AGENT_MODEL": "env-model"}, clear=True), \
+             patch("kb.core.kb_root", return_value=root):
+            call_agent("p", model="explicit-override")
+        cmd = mock_run.call_args.args[0]
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "explicit-override"
