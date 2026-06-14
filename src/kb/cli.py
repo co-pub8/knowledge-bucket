@@ -32,6 +32,8 @@ from .core import (
 )
 from .dedup import compute_content_hash, find_doc_by_source_key, generate_source_key
 from .embeddings import build_embeddings, embedding_search
+from .generate import build_sft
+from .generate import generate as generate_dataset
 from .graph import build_graph, load_taxonomy, resolve_virtual_collection
 from .health import compute_health
 from .index import build_index, index_path, repair_index, search_index, sync_index, verify_index
@@ -40,8 +42,6 @@ from .related import build_concept_edges, build_doc_edges, find_cooccurring_conc
 from .storage import get_raw, save_raw
 from .sync import sync
 from .vectors import build_vectors, semantic_search
-
-from .generate import build_sft, generate as generate_dataset
 
 
 @click.group()
@@ -1189,12 +1189,23 @@ def doctor():
 
 
 @main.command()
-@click.option("--concept", default=None, help="Filter docs whose front matter mentions this concept (substring)")
-@click.option("--type", "source_type", default=None, help="Filter by source_type (web|paper|git_repo|memo|pdf|video)")
-@click.option("--pairs", "-n", type=int, default=5, show_default=True, help="Instruction pairs to generate per doc")
-@click.option("--format", "fmt", type=click.Choice(["openai", "alpaca"]), default="openai", show_default=True)
+@click.option(
+    "--concept", default=None,
+    help="Filter docs whose front matter mentions this concept (substring)",
+)
+@click.option(
+    "--type", "source_type", default=None,
+    help="Filter by source_type (web|paper|git_repo|memo|pdf|video)",
+)
+@click.option("--pairs", "-n", type=int, default=5, show_default=True,
+              help="Instruction pairs to generate per doc")
+@click.option("--format", "fmt", type=click.Choice(["openai", "alpaca"]),
+              default="openai", show_default=True)
 @click.option("--limit", type=int, default=None, help="Max docs to process")
-@click.option("--output", "-o", default=None, help="Output JSONL path (default .kb/training/sft-<tag>.jsonl)")
+@click.option(
+    "--output", "-o", default=None,
+    help="Output JSONL path (default .kb/training/sft-<tag>.jsonl)",
+)
 def generate(concept: str | None, source_type: str | None, pairs: int, fmt: str,
              limit: int | None, output: str | None):
     """Generate domain training data (SFT JSONL) from analyzed docs via the agent proxy."""
@@ -1216,15 +1227,22 @@ def generate(concept: str | None, source_type: str | None, pairs: int, fmt: str,
 
 
 @main.command()
-@click.option("--concept", default=None, help="Filter docs by concept (substring). Default: all docs.")
+@click.option("--concept", default=None,
+              help="Filter docs by concept (substring). Default: all docs.")
 @click.option("--type", "source_type", default=None, help="Filter by source_type.")
-@click.option("--pairs", "-n", type=int, default=5, show_default=True, help="Pairs per doc")
-@click.option("--split", type=float, default=0.95, show_default=True, help="Train fraction (rest = val)")
-@click.option("--seed", type=int, default=42, show_default=True, help="Shuffle seed (deterministic)")
+@click.option("--pairs", "-n", type=int, default=5, show_default=True,
+              help="Pairs per doc")
+@click.option("--split", type=float, default=0.95, show_default=True,
+              help="Train fraction (rest = val)")
+@click.option("--seed", type=int, default=42, show_default=True,
+              help="Shuffle seed (deterministic)")
 @click.option("--limit", type=int, default=None, help="Max docs to process")
-@click.option("--format", "fmt", type=click.Choice(["openai", "alpaca"]), default="openai", show_default=True)
-@click.option("--output-dir", "-o", default=None, help="Output dir (default .kb/training/sft-dataset)")
-@click.option("--no-resume", is_flag=True, help="Ignore manifest; regenerate all docs")
+@click.option("--format", "fmt", type=click.Choice(["openai", "alpaca"]),
+              default="openai", show_default=True)
+@click.option("--output-dir", "-o", default=None,
+              help="Output dir (default .kb/training/sft-dataset)")
+@click.option("--no-resume", is_flag=True,
+              help="Ignore manifest; regenerate all docs")
 def sft(concept, source_type, pairs, split, seed, limit, fmt, output_dir, no_resume):
     """One-command SFT dataset build: generate → dedup → shuffle → train/val split.
 
