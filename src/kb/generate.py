@@ -207,3 +207,132 @@ def _default_name(concept: str | None, source_type: str | None) -> str:
     tag = concept or source_type or "all"
     tag = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-") or "all"
     return f"sft-{tag}.jsonl"
+
+
+def build_sft(root: str, *, n_pairs: int = 5, split: float = 0.95, seed: int = 42,
+               concept: str | None = None, source_type: str | None = None,
+               limit: int | None = None, output_dir: str | None = None,
+               system: str = "", fmt: str = "openai", resume: bool = True) -> dict:
+    """One-command SFT dataset build: generate, dedup, shuffle, train/val split.
+
+    Source of truth is ``all.jsonl`` (append-only). On each run we:
+      1. load all.jsonl → existing pairs + dedup hashes + done doc set
+      2. generate new docs not yet present, append to all.jsonl
+      3. deterministically shuffle the FULL pair set → train/val split
+    So resume never clobbers output: train/val always reflect every generated
+    pair, and re-running only adds docs that are new since last run.
+
+    Output layout::
+
+        <output_dir>/
+          all.jsonl          # append-only source of truth (every pair)
+          train.jsonl        # derived: shuffled + split
+          val.jsonl
+          stats.json
+          manifest.jsonl     # one line per processed doc (for inspection)
+    """
+    import collections
+    import random
+
+    docs = select_docs(root, concept=concept, source_type=source_type, limit=limit)
+    out_dir = output_dir or os.path.join(root, ".kb", "training", "sft-dataset")
+    os.makedirs(out_dir, exist_ok=True)
+    all_path = os.path.join(out_dir, "all.jsonl")
+    manifest_path = os.path.join(out_dir, "manifest.jsonl")
+
+    # Load existing pairs (all.jsonl) and done-doc set (manifest.jsonl).
+    # Done-tracking is separate from pairs so a doc that yields 0 pairs is still
+    # marked done and not retried forever.
+    all_pairs: list[dict] = []
+    seen: set[str] = set()
+    done_docs: set[str] = set()
+    if resume:
+        if os.path.exists(all_path):
+            with open(all_path, encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        rec = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    all_pairs.append(rec)
+                    instr = _first_user_text(rec)
+                    if instr:
+                        seen.add(hashlib.sha1(instr.lower().encode()).hexdigest()[:12])
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        done_docs.add(json.loads(ln)["doc"])
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
+    n_new = 0
+    n_skipped_resume = 0
+    n_failed = 0
+    manifest_rows: list[dict] = []
+    afh = open(all_path, "a", encoding="utf-8")
+    mfh = open(manifest_path, "a", encoding="utf-8")
+    try:
+        for dp in docs:
+            doc_basename = os.path.basename(dp).removesuffix(".md")
+            if doc_basename in done_docs:
+                n_skipped_resume += 1
+                continue
+            try:
+                recs = generate_for_doc(dp, n_pairs=n_pairs, fmt=fmt, system=system, seen=seen)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("generate failed for %s: %s", dp, e)
+                n_failed += 1
+                continue  # not recorded → retries next run
+            for r in recs:
+                afh.write(json.dumps(r, ensure_ascii=False) + "\n")
+                all_pairs.append(r)
+            afh.flush()
+            mfh.write(json.dumps({"doc": doc_basename, "pairs": len(recs)}) + "\n")
+            mfh.flush()
+            n_new += 1
+            manifest_rows.append({"doc": doc_basename, "pairs": len(recs)})
+    finally:
+        afh.close()
+        mfh.close()
+
+    # Deterministic shuffle + train/val split over the FULL pair set.
+    rng = random.Random(seed)
+    rng.shuffle(all_pairs)
+    n_val = max(1, int(len(all_pairs) * (1 - split))) if len(all_pairs) > 1 else 0
+    val = all_pairs[:n_val]
+    train = all_pairs[n_val:]
+
+    for name, rows in (("train", train), ("val", val)):
+        with open(os.path.join(out_dir, f"{name}.jsonl"), "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    diff_dist = collections.Counter(r.get("_difficulty", "") for r in all_pairs)
+    src_docs = {r.get("_source_doc", "") for r in all_pairs if r.get("_source_doc")}
+    stats = {
+        "total_pairs": len(all_pairs),
+        "train_pairs": len(train),
+        "val_pairs": len(val),
+        "source_docs": len(src_docs),
+        "docs_processed_this_run": n_new,
+        "docs_skipped_resume": n_skipped_resume,
+        "docs_failed": n_failed,
+        "difficulty": dict(diff_dist),
+        "format": fmt,
+        "output_dir": out_dir,
+    }
+    with open(os.path.join(out_dir, "stats.json"), "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+    return stats
+
+
+def _first_user_text(rec: dict) -> str:
+    """Extract the user instruction text from a record (openai or alpaca)."""
+    msgs = rec.get("messages")
+    if isinstance(msgs, list):
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "user":
+                return str(m.get("content", ""))
+    return str(rec.get("instruction", ""))
+

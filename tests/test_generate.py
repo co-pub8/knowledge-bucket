@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from kb.generate import (
     _to_output,
+    build_sft,
     generate_for_doc,
     select_docs,
 )
@@ -111,3 +112,62 @@ class TestGenerateForDoc:
                 assert False, "should raise"
             except RuntimeError:
                 pass
+
+
+class TestBuildSft:
+    def _make_kb(self, tmp):
+        for i, body in enumerate(["alpha content about RAG", "beta content about agents", "gamma about vectors"]):
+            _write_doc(str(tmp), f"d{i:02x}", "web", "", body)
+        return str(tmp)
+
+    def test_split_shuffle_stats(self, tmp_path):
+        d = tmp_path / "kb"
+        d.mkdir()
+        root = self._make_kb(d)
+
+        def fake_gen(doc_path, *, n_pairs, fmt, system, seen):
+            from kb.generate import _to_output
+            import os
+            return [_to_output({"instruction": f"Q-{doc_path[-4:]}-{j}",
+                                "context": "", "response": f"A{j}", "difficulty": "basic",
+                                "tags": []}, fmt, system) | {"_source_doc": doc_path[-6:],
+                                "_difficulty": "basic", "_tags": []} for j in range(n_pairs)]
+
+        with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
+            stats = build_sft(root, n_pairs=4, split=0.5, seed=1,
+                              output_dir=str(tmp_path / "out"))
+        assert stats["total_pairs"] == 12  # 3 docs x 4
+        assert stats["train_pairs"] + stats["val_pairs"] == 12
+        assert stats["val_pairs"] >= 1
+        assert stats["source_docs"] == 3
+        import json, os
+        train = [json.loads(l) for l in open(os.path.join(stats["output_dir"], "train.jsonl"))]
+        val = [json.loads(l) for l in open(os.path.join(stats["output_dir"], "val.jsonl"))]
+        assert len(train) + len(val) == 12
+        # determinism: same seed → same split
+        with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
+            stats2 = build_sft(root, n_pairs=4, split=0.5, seed=1, output_dir=str(tmp_path / "out2"))
+        train2 = [json.loads(l) for l in open(os.path.join(stats2["output_dir"], "train.jsonl"))]
+        assert [r["messages"][1]["content"] for r in train] == [r["messages"][1]["content"] for r in train2]
+
+    def test_resume_skips_done(self, tmp_path):
+        d = tmp_path / "kb"
+        d.mkdir()
+        root = self._make_kb(d)
+        calls = {"n": 0}
+
+        def fake_gen(doc_path, *, n_pairs, fmt, system, seen):
+            calls["n"] += 1
+            return []
+
+        out = tmp_path / "out"
+        with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
+            build_sft(root, n_pairs=2, output_dir=str(out))           # processes 3
+        assert calls["n"] == 3
+        with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
+            build_sft(root, n_pairs=2, output_dir=str(out))           # resume: skips 3
+        assert calls["n"] == 3
+        # --no-resume regenerates
+        with patch("kb.generate.generate_for_doc", side_effect=fake_gen):
+            build_sft(root, n_pairs=2, output_dir=str(out), resume=False)
+        assert calls["n"] == 6

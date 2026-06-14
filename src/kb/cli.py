@@ -41,7 +41,7 @@ from .storage import get_raw, save_raw
 from .sync import sync
 from .vectors import build_vectors, semantic_search
 
-from .generate import generate as generate_dataset
+from .generate import build_sft, generate as generate_dataset
 
 
 @click.group()
@@ -1213,6 +1213,43 @@ def generate(concept: str | None, source_type: str | None, pairs: int, fmt: str,
     click.echo(f"Processed {report['docs']} doc(s) → {report['pairs']} pair(s) "
                f"[{fmt}] (skipped {report['duplicates_skipped']} dupes)")
     click.echo(f"Output: {report['output']}")
+
+
+@main.command()
+@click.option("--concept", default=None, help="Filter docs by concept (substring). Default: all docs.")
+@click.option("--type", "source_type", default=None, help="Filter by source_type.")
+@click.option("--pairs", "-n", type=int, default=5, show_default=True, help="Pairs per doc")
+@click.option("--split", type=float, default=0.95, show_default=True, help="Train fraction (rest = val)")
+@click.option("--seed", type=int, default=42, show_default=True, help="Shuffle seed (deterministic)")
+@click.option("--limit", type=int, default=None, help="Max docs to process")
+@click.option("--format", "fmt", type=click.Choice(["openai", "alpaca"]), default="openai", show_default=True)
+@click.option("--output-dir", "-o", default=None, help="Output dir (default .kb/training/sft-dataset)")
+@click.option("--no-resume", is_flag=True, help="Ignore manifest; regenerate all docs")
+def sft(concept, source_type, pairs, split, seed, limit, fmt, output_dir, no_resume):
+    """One-command SFT dataset build: generate → dedup → shuffle → train/val split.
+
+    Generates instruction pairs from the corpus via the agent proxy (use the
+    DEFAULT high-quality model, not haiku — generation is quality-critical),
+    deduplicates across all docs, deterministically shuffles, and writes
+    train.jsonl / val.jsonl / stats.json. Resumable: re-running skips already
+    processed docs unless --no-resume.
+    """
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+    if not get_api_key():
+        click.echo("Error: ai-hub-agent-proxy not found (set KB_AGENT_PROXY)", err=True)
+        raise SystemExit(1)
+    stats = build_sft(root, n_pairs=pairs, split=split, seed=seed, concept=concept,
+                      source_type=source_type, limit=limit, output_dir=output_dir,
+                      fmt=fmt, resume=not no_resume)
+    click.echo(f"Pairs: {stats['total_pairs']} (train={stats['train_pairs']}, "
+               f"val={stats['val_pairs']}) from {stats['source_docs']} doc(s)")
+    click.echo(f"Difficulty: {stats['difficulty']}")
+    if stats["docs_failed"]:
+        click.echo(f"Failed docs: {stats['docs_failed']} (will retry next run)", err=True)
+    click.echo(f"Output: {stats['output_dir']}/{{train,val}}.jsonl")
 
 
 @main.command()
