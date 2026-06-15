@@ -13,25 +13,25 @@ kb-tools は **自分の corpus で fine-tune したモデルで自分の分析�
 
 ---
 
-## 現在の標的 — kb が kb を改善する
+## 現在の標的 — `git clone` から 5 分でフィードバックループを体感できる状態
 
-**目標**: `kb improve` 一発で「baseline → 評価 → fine-tune → 評価 → 改善判定 → 採用 or 中断」のループが回る。改善が見えなくなったら自動で止まる。
+**目標**: 新しいユーザーがリポジトリを clone して README のコマンドを順番に叩くと、5 分以内に「kb sft → kb evaluate → kb improve」が自分の目で動くことを確認できる。デモは実在のドメイン（例: ある OSS ライブラリのドキュメント）を使い、`examples/demo-bucket/` に同梱する。
 
 ### 完了基準
 
-1. `kb improve --iterations N [--target-metric concept_jaccard_mean|judge_score_mean] [--tolerance T] [--baseline B]` が動作する
-2. 各イテレーションは `kb evaluate` 相当の計測を走らせ、目標指標が改善したら `kb models add` で採用、しきい値を下回ったら前ラウンドの最良を採用
-3. 連続 K イテレーション改善なし、またはメトリクスが前ラウンド最良を下回ったら自動中断する
-4. 全ラウンドの状態（計測値・採用モデル・abort 理由）が `.kb/improve/<run_id>/` に永続化され、`kb improve log` で一覧できる
-5. e2e テスト: モック call_agent で 3 イテレーションのうち少なくとも 1 回は概念 Jaccard または judge スコアが改善することを保証
-6. `docs/FEEDBACK_LOOP.md` の "Automating the loop" 章に、手順・abort 条件・コスト注意・撤退基準を追記
-7. README に「`kb improve` で実 corpus の分析が改善した」短い Example を 1 本掲載
+1. `examples/demo-bucket/` に **実在ドメイン**（具体的なライブラリ・記事・論文）のサンプル doc が **10 件以上** 含まれる
+2. `examples/demo-bucket/.kb/index.db` が pre-built で、`git clone` 直後から `kb search` が動く
+3. `examples/demo.sh` が **1 コマンドで**「ingest → analyze → sft → evaluate → improve log」まで通しで実行できる（LLM 部分はモック可）
+4. `examples/README.md` に「何のデモか」「各ファイルの役割」「再現手順」が簡潔にまとまっている
+5. README.md の先頭に "Quick Demo" セクションがあり、`git clone && ./examples/demo.sh` で体験できる
+6. CI (`.github/workflows/tests.yml`) で `examples/demo.sh --smoke` を実行し、demo が壊れていないことを毎日確認する
+7. `docs/FEEDBACK_LOOP.md` §11 "Dogfooding notes" に、この demo を最初の事例としてリンクを貼る
 
 ### 範囲外 (今はやらない)
 
-- fine-tune バックエンドの自動呼び出し。`kb finetune submit` までの記録で止め、実際の学習はユーザーか外部ツールに委譲
-- Web UI / マルチバケット横断のオーケストレーション
-- LLM コストの自動最適化（abort 条件で十分）
+- PyPI 公開・blog・告知。ユーザーに届ける経路は Phase 15 以降で別途
+- 実 fine-tune バックエンドの統合。demo は LLM をモックしてよい（実 LLM は任意の `--real-llm` フラグでのオプション）
+- 動画・スクリーンキャスト・多言語ドキュメント
 
 ---
 
@@ -39,7 +39,7 @@ kb-tools は **自分の corpus で fine-tune したモデルで自分の分析�
 
 | 次 | 内容 | 着手条件 |
 |---|---|---|
-| **配布・採用拡大** | PyPI 公開、blog、demo。`kb improve` の Example で外向きに展開 | 上の 7 項目が達成されてから |
+| **配布・採用拡大 (旧 Phase 15 後半)** | PyPI 公開、blog、告知。demo を landing page に貼る | demo が動く状態になってから |
 | **規模化 (旧 Phase 8)** | 16 shard 分割、30 万文書 / 5 GB 対応 | ユーザー規模が要件を満たしたら |
 | **Web UI 刷新** | Next.js / グラフ可視化 | CLI で詰まる具体的なユースケースが出てから |
 
