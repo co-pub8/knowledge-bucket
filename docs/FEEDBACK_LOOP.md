@@ -380,6 +380,15 @@ values, and asserts that the strongest candidate becomes the final
 active model. No real LLM calls happen; the test runs in well under
 a second.
 
+The full loop is also wired into the bundled demo bucket at
+[`examples/README.md`](../examples/README.md). `./examples/demo.sh --smoke`
+runs the CI-safe path (no LLM, ~2 seconds, exit 0), and
+`./examples/demo.sh --real-llm` runs the same seven steps
+(ingest → index → analyze → sft → models add → evaluate → improve) against
+a real `ai-hub-agent-proxy`. The demo bucket ships with 12 analyzed-style
+docs on **vector databases and embeddings** so the loop has real
+content to chew on even before the first `kb analyze` run completes.
+
 A live dogfooding run on the kb-tools corpus itself is tracked in
 [`GOAL.md`](GOAL.md) Phase 14. Once a real candidate model is trained
 and registered, the run will be linked here with its `run_id` and the

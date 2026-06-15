@@ -35,6 +35,25 @@ kb index --sync
 kb search "hello"
 ```
 
+## Quick Demo
+
+A pre-populated demo bucket ships in `examples/demo-bucket/` with 12
+sample docs on **vector databases and embeddings**. The script runs the
+full feedback loop (ingest → index → analyze → sft → models add →
+evaluate → improve) end-to-end:
+
+```bash
+git clone https://github.com/nobu007/knowledge-bucket.git
+cd knowledge-bucket
+pip install -e ".[dev]"
+./examples/demo.sh --smoke    # CI mode, no LLM, ~2 seconds
+./examples/demo.sh --real-llm # full pipeline (needs KB_AGENT_PROXY)
+```
+
+See [`examples/README.md`](examples/README.md) for the step-by-step
+walkthrough, the `--help` flag reference, and how to swap in your own
+corpus.
+
 ## CLIコマンド
 
 ### 基本
