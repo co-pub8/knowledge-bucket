@@ -243,3 +243,34 @@ kb graph build                                  # グラフ更新（概念 df �
 ```
 
 追加後、`kb health` の Top Concepts に新しいドメイン概念が現れたら `kb generate --concept <新概念>` で生成可能になる。
+
+---
+
+## 8. 生成したデータの次: `kb improve` への引き渡し
+
+`kb sft` で生成した JSONL は、そのままだと **静的なアセット** でしかない。fine-tune
+を回してモデルを登録し、評価し、改善を判定し、採用する — のループを自動で回すのが
+`kb improve`。
+
+最短経路:
+
+```bash
+# 1. 既に kb sft でデータを生成済み
+kb sft --concept retrieval-augmented-generation
+
+# 2. 外部で fine-tune → kb models add で登録
+kb models add kb-rag-v2 \
+  --base-model claude-opus-4-7 --backend openai_ft
+
+# 3. kb improve がベースラインと新候補を自動で比較し、改善した方を採用
+kb improve run -n 3 -m concept_jaccard_mean
+
+# 4. 結果の確認・abort 時の対処
+kb improve log
+kb improve log show <run_id>
+```
+
+`kb improve` は **fine-tune の実行までは自動化しない** (学習は外部トレーナー、
+コスト・ハードウェア・時間の都合で一晩回すのが現実的)。自動化の守備範囲は
+「**計測 → 比較 → 採用**」の後半ループ。中断条件・コスト目安・abort プレイ
+ブックは [`FEEDBACK_LOOP.md`](FEEDBACK_LOOP.md) を参照。

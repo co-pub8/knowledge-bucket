@@ -97,6 +97,33 @@ kb search "hello"
 
 詳細は [`docs/TRAINING_DATA_GENERATION.md`](docs/TRAINING_DATA_GENERATION.md) を参照。
 
+### 自己改善ループ
+
+| コマンド | 説明 |
+|---|---|
+| `kb finetune prepare\|submit` | 学習データ変換 (`hf`/`openai`/`alpaca`) とジョブ記録 |
+| `kb models add\|list\|show\|use` | モデル登録・一覧・切替 |
+| `kb evaluate` | 候補 vs ベースラインで concept Jaccard / F1 / importance KL / judge スコアを計測 |
+| `kb improve run` | 自動ループ: 候補を順に評価し、改善したものを active model に昇格。`--iterations` / `--target-metric` / `--tolerance` / `--baseline` / `--candidates` / `--max-misses` / `--limit` |
+| `kb improve log\|log list\|log show` | 過去 run の一覧・詳細表示 |
+
+```bash
+# 1. SFT データを生成
+kb sft --concept retrieval-augmented-generation --pairs 5
+
+# 2. 外部で fine-tune、結果を登録
+kb models add kb-rag-v2 --base-model claude-opus-4-7 --backend openai_ft
+
+# 3. kb improve が候補を評価し、改善したものを自動採用
+kb improve run -n 3 -m concept_jaccard_mean
+
+# 4. 結果を確認
+kb improve log
+kb improve log show 01JABCDEFGHJK
+```
+
+詳細は [`docs/FEEDBACK_LOOP.md`](docs/FEEDBACK_LOOP.md) を参照。
+
 ### Web UI
 
 | コマンド | 説明 |
