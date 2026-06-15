@@ -1403,4 +1403,379 @@ class TestEvaluateCachingBehavior:
         assert call_count["n"] >= 8
 
 
+# ---------------------------------------------------------------------------
+# Phase 14: kb improve / kb improve log CLI
+# ---------------------------------------------------------------------------
+
+
+class TestImproveCLI:
+    """CLI invocation tests for ``kb improve`` and ``kb improve log``.
+
+    The orchestrator itself is covered in ``tests/test_improve.py``; these
+    tests pin down the click surface and the JSON / table dispatch.
+    """
+
+    def test_improve_command_invokes_run_improve(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # Register baseline + candidate so resolution has a target.
+            runner.invoke(main, [
+                "models", "add", "kb-base",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-cand",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, ["models", "use", "kb-base"])
+            # Patch the orchestrator body to a stub; the goal is to confirm
+            # the CLI dispatches into it with the right arguments.
+            from kb import improve as _improve
+            with patch.object(
+                _improve, "run_improve",
+                return_value={
+                    "run_id": "01STUB", "status": "completed",
+                    "target_metric": "concept_jaccard_mean",
+                    "target_direction": "higher", "tolerance": 0.0,
+                    "baseline_id": "kb-base",
+                    "initial_baseline_metric": None,
+                    "iterations_requested": 2, "total_iterations": 2,
+                    "adopted_count": 1, "missed_count": 0,
+                    "final_model_id": "kb-cand",
+                    "started_at": "2026-06-15T00:00:00Z",
+                    "finished_at": "2026-06-15T00:01:00Z",
+                    "iterations": [],
+                },
+            ) as mock_run:
+                result = runner.invoke(main, [
+                    "improve", "run", "-n", "2",
+                    "--target-metric", "concept_jaccard_mean",
+                    "--baseline", "kb-base",
+                    "--candidates", "kb-cand",
+                ])
+            assert result.exit_code == 0, result.output
+            assert mock_run.call_count == 1
+            kwargs = mock_run.call_args.kwargs
+            assert kwargs["iterations"] == 2
+            assert kwargs["target_metric"] == "concept_jaccard_mean"
+            assert kwargs["baseline"] == "kb-base"
+            assert kwargs["candidates"] == ["kb-cand"]
+            assert "Status:" in result.output
+            assert "Final model:" in result.output
+
+    def test_improve_json_flag_emits_summary(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-base",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-cand",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, ["models", "use", "kb-base"])
+            from kb import improve as _improve
+            with patch.object(
+                _improve, "run_improve",
+                return_value={
+                    "run_id": "01JSON", "status": "completed",
+                    "target_metric": "concept_jaccard_mean",
+                    "target_direction": "higher", "tolerance": 0.0,
+                    "baseline_id": "kb-base",
+                    "initial_baseline_metric": 0.5,
+                    "iterations_requested": 1, "total_iterations": 1,
+                    "adopted_count": 1, "missed_count": 0,
+                    "final_model_id": "kb-cand",
+                    "started_at": "2026-06-15T00:00:00Z",
+                    "finished_at": "2026-06-15T00:01:00Z",
+                    "iterations": [],
+                },
+            ):
+                result = runner.invoke(main, [
+                    "improve", "run", "-n", "1",
+                    "--baseline", "kb-base", "--candidates", "kb-cand",
+                    "--json",
+                ])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["run_id"] == "01JSON"
+            assert data["status"] == "completed"
+            assert data["final_model_id"] == "kb-cand"
+
+    def test_improve_log_list_default_subcommand(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # No runs yet → table mode shows the empty message.
+            result = runner.invoke(main, ["improve", "log"])
+            assert result.exit_code == 0
+            assert "No improve runs found" in result.output
+
+    def test_improve_log_list_json(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # No runs → JSON output is an empty list.
+            result = runner.invoke(main, ["improve", "log", "list", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data == []
+
+    def test_improve_log_show_run_id(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # Seed a synthetic run directory.
+            run_dir = os.path.join(".kb", "improve", "01ABCXYZ")
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "summary.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({
+                    "run_id": "01ABCXYZ",
+                    "status": "completed",
+                    "target_metric": "concept_jaccard_mean",
+                    "target_direction": "higher",
+                    "tolerance": 0.0,
+                    "baseline_id": "kb-base",
+                    "initial_baseline_metric": 0.5,
+                    "final_model_id": "kb-cand",
+                    "total_iterations": 1, "iterations_requested": 1,
+                    "adopted_count": 1, "missed_count": 0,
+                    "started_at": "2026-06-15T00:00:00Z",
+                    "finished_at": "2026-06-15T00:01:00Z",
+                    "iterations": [],
+                }, f)
+            result = runner.invoke(main, [
+                "improve", "log", "show", "01ABCXYZ",
+            ])
+            assert result.exit_code == 0, result.output
+            assert "01ABCXYZ" in result.output
+            assert "completed" in result.output
+            assert "kb-cand" in result.output
+
+    def test_improve_log_show_json(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            run_dir = os.path.join(".kb", "improve", "01JSONRUN")
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "summary.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({
+                    "run_id": "01JSONRUN",
+                    "status": "completed",
+                    "target_metric": "judge_score_mean",
+                }, f)
+            result = runner.invoke(main, [
+                "improve", "log", "show", "01JSONRUN", "--json",
+            ])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["run_id"] == "01JSONRUN"
+            assert data["target_metric"] == "judge_score_mean"
+
+    def test_improve_log_missing_run_exits_nonzero(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "improve", "log", "show", "01GHOSTRUN",
+            ])
+            assert result.exit_code == 1
+            assert "Improve run not found" in result.output
+
+    def test_improve_requires_init(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["improve", "run", "-n", "1"])
+            assert result.exit_code == 1
+            assert "kb init" in result.output
+
+    def test_improve_handles_no_candidates_error(self):
+        """A bucket with no candidate model emits a clear error and exits 1."""
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            # Register only the baseline — no candidates.
+            runner.invoke(main, [
+                "models", "add", "kb-only",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            result = runner.invoke(main, [
+                "improve", "run", "-n", "1", "--baseline", "kb-only",
+            ])
+            assert result.exit_code == 1
+            assert "No candidate models" in result.output
+
+    def test_improve_passes_through_extended_flags(self):
+        """The full flag set on ``kb improve run`` is forwarded to run_improve.
+
+        Pin down --tolerance, --max-misses, --judge-model, --limit,
+        --no-cache (→ use_cache=False) and --target-metric. The goal is
+        to catch future regressions where the CLI silently drops a flag.
+        """
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-base",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-cand",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, ["models", "use", "kb-base"])
+            from kb import improve as _improve
+            with patch.object(
+                _improve, "run_improve",
+                return_value={
+                    "run_id": "01FLAGS", "status": "completed",
+                    "target_metric": "judge_score_mean",
+                    "target_direction": "higher", "tolerance": 0.1,
+                    "baseline_id": "kb-base",
+                    "initial_baseline_metric": 3.0,
+                    "iterations_requested": 1, "total_iterations": 1,
+                    "adopted_count": 1, "missed_count": 0,
+                    "final_model_id": "kb-cand",
+                    "started_at": "2026-06-15T00:00:00Z",
+                    "finished_at": "2026-06-15T00:01:00Z",
+                    "iterations": [],
+                },
+            ) as mock_run:
+                result = runner.invoke(main, [
+                    "improve", "run",
+                    "-n", "1",
+                    "-m", "judge_score_mean",
+                    "-t", "0.1",
+                    "-b", "kb-base",
+                    "-c", "kb-cand",
+                    "-j", "claude-opus-4-7",
+                    "-k", "3",
+                    "-l", "25",
+                    "--no-cache",
+                ])
+            assert result.exit_code == 0, result.output
+            assert mock_run.call_count == 1
+            kw = mock_run.call_args.kwargs
+            assert kw["iterations"] == 1
+            assert kw["target_metric"] == "judge_score_mean"
+            assert kw["tolerance"] == 0.1
+            assert kw["baseline"] == "kb-base"
+            assert kw["candidates"] == ["kb-cand"]
+            assert kw["judge_model"] == "claude-opus-4-7"
+            assert kw["max_misses"] == 3
+            assert kw["limit"] == 25
+            assert kw["use_cache"] is False
+
+    def test_improve_text_summary_includes_iterations_table(self):
+        """Text mode renders the ITER/CANDIDATE/BASELINE/VALUE/DECISION rows."""
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            runner.invoke(main, [
+                "models", "add", "kb-base",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, [
+                "models", "add", "kb-cand",
+                "--base-model", "claude-opus-4-7",
+                "--backend", "external",
+            ])
+            runner.invoke(main, ["models", "use", "kb-base"])
+            from kb import improve as _improve
+            with patch.object(
+                _improve, "run_improve",
+                return_value={
+                    "run_id": "01TBL", "status": "completed",
+                    "target_metric": "concept_jaccard_mean",
+                    "target_direction": "higher", "tolerance": 0.0,
+                    "baseline_id": "kb-base",
+                    "initial_baseline_metric": 0.5,
+                    "iterations_requested": 1, "total_iterations": 1,
+                    "adopted_count": 1, "missed_count": 0,
+                    "final_model_id": "kb-cand",
+                    "started_at": "2026-06-15T00:00:00Z",
+                    "finished_at": "2026-06-15T00:01:00Z",
+                    "iterations": [
+                        {
+                            "iteration": 0,
+                            "candidate_id": "kb-cand",
+                            "baseline_id": "kb-base",
+                            "candidate_value": 0.7,
+                            "decision": "adopt",
+                        },
+                    ],
+                },
+            ):
+                result = runner.invoke(main, [
+                    "improve", "run", "-n", "1",
+                    "--baseline", "kb-base", "--candidates", "kb-cand",
+                ])
+            assert result.exit_code == 0, result.output
+            # Header and row labels.
+            assert "ITER" in result.output
+            assert "CANDIDATE" in result.output
+            assert "BASELINE" in result.output
+            assert "DECISION" in result.output
+            # Per-iteration row.
+            assert "kb-cand" in result.output
+            assert "0.7000" in result.output
+            assert "adopt" in result.output
+            # Footer with summary path.
+            assert "summary.json" in result.output
+            assert "iterations.jsonl" in result.output
+
+    def test_improve_log_list_json_with_seeded_runs(self):
+        """``kb improve log list --json`` returns both seeded runs reversed."""
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            for rid, started in [("01OLDER", "2026-06-01T00:00:00Z"),
+                                 ("01NEWER", "2026-06-15T00:00:00Z")]:
+                d = os.path.join(".kb", "improve", rid)
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "summary.json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump({"run_id": rid, "started_at": started,
+                               "status": "completed"}, f)
+            result = runner.invoke(main, ["improve", "log", "list", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert isinstance(data, list)
+            assert [r["run_id"] for r in data] == ["01NEWER", "01OLDER"]
+
+    def test_improve_rejects_unknown_target_metric(self):
+        """An unknown --target-metric is rejected by click.Choice (exit 2)."""
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "improve", "run", "-n", "1",
+                "-m", "totally_made_up_metric",
+            ])
+            assert result.exit_code == 2
+            assert "Invalid value" in result.output or "target-metric" in result.output
+
+    def test_improve_log_show_missing_run_id_exits_usage(self):
+        """``kb improve log show`` with no run_id exits 2 (usage)."""
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["improve", "log", "show"])
+            assert result.exit_code == 2
+            assert "Usage" in result.output
+
+
 # (no extra imports needed at the bottom — see top-of-file imports)

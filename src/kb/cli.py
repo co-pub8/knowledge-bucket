@@ -1901,6 +1901,269 @@ def evaluate_cmd(baseline, candidate, limit, reference_path, no_cache,
 
 
 # ---------------------------------------------------------------------------
+# Improve (Phase 14): self-iterating feedback loop
+# ---------------------------------------------------------------------------
+
+# Metrics accepted by ``kb improve`` as ``--target-metric``. Mirrors the
+# HIGHER_BETTER / LOWER_BETTER direction table in ``kb/improve.py``; kept
+# as a constant so the click.Choice is a single source of truth.
+_IMPROVE_METRICS = (
+    "concept_jaccard_mean",
+    "concept_f1_mean",
+    "concept_precision_mean",
+    "concept_recall_mean",
+    "judge_score_mean",
+    "importance_kl",
+    "importance_js",
+    "baseline_failure_rate",
+    "candidate_failure_rate",
+)
+
+
+@main.group("improve", invoke_without_command=True)
+@click.pass_context
+def improve_group(ctx):
+    """Self-iterating feedback loop: measure, compare, adopt."""
+    if ctx.invoked_subcommand is None:
+        # Default: behave like ``kb improve run``.
+        _improve_run(ctx)
+
+
+@improve_group.command("run")
+@click.option("--iterations", "-n", type=int, default=3, show_default=True,
+              help="Number of evaluation iterations to run.")
+@click.option(
+    "--target-metric", "-m", type=click.Choice(_IMPROVE_METRICS),
+    default="concept_jaccard_mean", show_default=True,
+    help="Metric from the eval report to optimize.",
+)
+@click.option("--tolerance", "-t", type=float, default=0.0, show_default=True,
+              help="Slack for adoption and regression checks (>=0).")
+@click.option("--baseline", "-b", default=None,
+              help="Baseline model id (default: agent_model, else first registered).")
+@click.option("--candidates", "-c", default=None,
+              help="Comma-separated candidate model ids "
+                   "(default: all registered minus baseline).")
+@click.option("--judge-model", "-j", "judge_model", default=None,
+              help="Override judge model id passed to evaluate.")
+@click.option("--max-misses", "-k", type=int, default=2, show_default=True,
+              help="Consecutive non-adoptions before abort.")
+@click.option("--limit", "-l", type=int, default=None,
+              help="Max docs per eval (passed to evaluate).")
+@click.option("--no-cache", "no_cache", is_flag=True,
+              help="Disable eval cache.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit the full run summary as JSON.")
+@click.pass_context
+def improve_run_cmd(ctx, iterations, target_metric, tolerance, baseline,
+                    candidates, judge_model, max_misses, limit, no_cache,
+                    as_json):
+    """Run the self-iterating feedback loop.
+
+    For each iteration, ``kb improve`` evaluates one candidate against the
+    current best via ``kb evaluate`` and adopts the candidate as the new
+    active model if it improves the target metric (beyond ``--tolerance``).
+    Aborts when ``--max-misses`` consecutive candidates fail to improve,
+    or when a candidate regresses below the initial baseline beyond
+    ``--tolerance``.
+
+    The actual fine-tuning is out of scope: candidates must be trained and
+    registered with ``kb models add`` before invoking ``kb improve``. The
+    orchestrator only handles the measure-compare-adopt half of the loop.
+
+    Examples:
+
+      kb improve run --iterations 3 --target-metric concept_jaccard_mean
+
+      kb improve run -n 5 -m judge_score_mean -t 0.1 -k 3 \\
+                     --candidates kb-rag-v2,kb-rag-v3
+    """
+    _improve_run(
+        ctx, iterations=iterations, target_metric=target_metric,
+        tolerance=tolerance, baseline=baseline, candidates=candidates,
+        judge_model=judge_model, max_misses=max_misses, limit=limit,
+        no_cache=no_cache, as_json=as_json,
+    )
+
+
+@improve_group.group("log", invoke_without_command=True)
+@click.pass_context
+def improve_log_group(ctx):
+    """Inspect past ``kb improve`` runs."""
+    if ctx.invoked_subcommand is None:
+        # Default: ``kb improve log`` → list
+        _improve_log_list(ctx)
+
+
+@improve_log_group.command("list")
+@click.option("--limit", "-n", type=int, default=10, show_default=True,
+              help="Max runs to list.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit JSON instead of a table.")
+@click.pass_context
+def improve_log_list_cmd(ctx, limit, as_json):
+    """List recent improve runs (most recent first)."""
+    _improve_log_list(ctx, limit=limit, as_json=as_json)
+
+
+@improve_log_group.command("show")
+@click.argument("run_id")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit JSON instead of a pretty summary.")
+@click.pass_context
+def improve_log_show_cmd(ctx, run_id, as_json):
+    """Show one run's full summary."""
+    _improve_log_show(ctx, run_id=run_id, as_json=as_json)
+
+
+# ---------------------------------------------------------------------------
+# Improve command bodies (Phase 14)
+# ---------------------------------------------------------------------------
+
+def _improve_run(ctx, *, iterations=3, target_metric="concept_jaccard_mean",
+                 tolerance=0.0, baseline=None, candidates=None,
+                 judge_model=None, max_misses=2, limit=None,
+                 no_cache=False, as_json=False):
+    """Shared body for ``kb improve`` and ``kb improve run``."""
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import improve as _improve
+
+    cand_list: list[str] | None = None
+    if candidates:
+        cand_list = [c.strip() for c in candidates.split(",") if c.strip()]
+
+    try:
+        summary = _improve.run_improve(
+            root, iterations=iterations, target_metric=target_metric,
+            tolerance=tolerance, baseline=baseline, candidates=cand_list,
+            judge_model=judge_model, max_misses=max_misses, limit=limit,
+            use_cache=not no_cache,
+        )
+    except (ValueError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    if as_json:
+        click.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    # Human-readable summary.
+    click.echo(f"=== kb improve: {summary['run_id']} ===")
+    click.echo()
+    click.echo(f"Status:          {summary['status']}")
+    click.echo(f"Target metric:   {summary['target_metric']} "
+               f"({summary['target_direction']}-better)")
+    click.echo(f"Tolerance:       {summary['tolerance']}")
+    click.echo(f"Baseline:        {summary['baseline_id']} "
+               f"(initial={summary.get('initial_baseline_metric')})")
+    click.echo(f"Iterations run:  {summary['total_iterations']}/"
+               f"{summary['iterations_requested']}")
+    click.echo(f"Adopted:         {summary['adopted_count']}")
+    click.echo(f"Misses:          {summary.get('missed_count', 0)}")
+    click.echo(f"Final model:     {summary['final_model_id']}")
+    click.echo(f"Started:         {summary.get('started_at')}")
+    click.echo(f"Finished:        {summary.get('finished_at')}")
+    click.echo()
+    if summary.get("iterations"):
+        click.echo("--- Iterations ---")
+        click.echo(f"  {'ITER':<5}{'CANDIDATE':<22}{'BASELINE':<22}"
+                   f"{'VALUE':>9}  DECISION")
+        for it in summary["iterations"]:
+            val = it.get("candidate_value")
+            val_str = f"{val:.4f}" if isinstance(val, (int, float)) else "-"
+            click.echo(
+                f"  {it.get('iteration', '?'):<5}"
+                f"{it.get('candidate_id', ''):<22}"
+                f"{it.get('baseline_id', ''):<22}"
+                f"{val_str:>9}  {it.get('decision', '')}"
+            )
+    click.echo()
+    click.echo(f"Summary:  .kb/improve/{summary['run_id']}/summary.json")
+    click.echo(f"Log:      .kb/improve/{summary['run_id']}/iterations.jsonl")
+
+
+def _improve_log_list(ctx, *, limit=10, as_json=False):
+    """Body for ``kb improve log`` and ``kb improve log list``."""
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import improve as _improve
+
+    runs = _improve.list_runs(root, limit=limit)
+    if as_json:
+        click.echo(json.dumps(runs, ensure_ascii=False, indent=2))
+        return
+    if not runs:
+        click.echo("No improve runs found. Run 'kb improve' to start one.")
+        return
+    click.echo(
+        f"  {'RUN_ID':<28}{'STARTED':<22}{'STATUS':<26}"
+        f"{'METRIC':<22}{'FINAL_MODEL':<22}ITER"
+    )
+    for r in runs:
+        started = r.get("started_at", "")
+        click.echo(
+            f"  {r.get('run_id', ''):<28}"
+            f"{started:<22}"
+            f"{r.get('status', ''):<26}"
+            f"{r.get('target_metric', ''):<22}"
+            f"{r.get('final_model_id', ''):<22}"
+            f"{r.get('total_iterations', '')}"
+        )
+
+
+def _improve_log_show(ctx, *, run_id, as_json=False):
+    """Body for ``kb improve log show <run_id>``."""
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import improve as _improve
+
+    if not run_id:
+        click.echo("Usage: kb improve log show <run_id>", err=True)
+        raise SystemExit(2)
+    rec = _improve.get_run(root, run_id)
+    if rec is None:
+        click.echo(f"Improve run not found: {run_id}", err=True)
+        raise SystemExit(1)
+    if as_json:
+        click.echo(json.dumps(rec, ensure_ascii=False, indent=2))
+        return
+    click.echo(f"=== Improve run: {rec.get('run_id', '?')} ===")
+    click.echo()
+    for k in ("status", "target_metric", "target_direction", "tolerance",
+              "baseline_id", "initial_baseline_metric", "final_model_id",
+              "total_iterations", "iterations_requested", "adopted_count",
+              "missed_count", "judge_model", "limit",
+              "started_at", "finished_at"):
+        if k in rec and rec[k] is not None:
+            click.echo(f"{k:<24} {rec[k]}")
+    iters = rec.get("iterations") or []
+    if iters:
+        click.echo()
+        click.echo("--- Iterations ---")
+        click.echo(f"  {'ITER':<5}{'CANDIDATE':<22}{'BASELINE':<22}"
+                   f"{'VALUE':>9}  DECISION")
+        for it in iters:
+            val = it.get("candidate_value")
+            val_str = f"{val:.4f}" if isinstance(val, (int, float)) else "-"
+            click.echo(
+                f"  {it.get('iteration', '?'):<5}"
+                f"{it.get('candidate_id', ''):<22}"
+                f"{it.get('baseline_id', ''):<22}"
+                f"{val_str:>9}  {it.get('decision', '')}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Config (Phase 13.1)
 # ---------------------------------------------------------------------------
 
