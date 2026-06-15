@@ -187,6 +187,7 @@ def ensure_dirs(root: str) -> None:
 # ``kb init``.
 MODELS_DIR = ".kb/models"
 FINETUNE_DIR = ".kb/finetune"
+IMPROVE_DIR = ".kb/improve"
 
 
 def ensure_models_dirs(root: str) -> None:
@@ -198,6 +199,18 @@ def ensure_models_dirs(root: str) -> None:
     for d in [os.path.join(root, MODELS_DIR),
               os.path.join(root, FINETUNE_DIR)]:
         os.makedirs(d, exist_ok=True)
+
+
+def ensure_improve_dir(root: str, run_id: str) -> str:
+    """Create the per-run storage directory for ``kb improve``.
+
+    Returns the absolute path of the created directory. Each ``kb improve``
+    invocation gets its own subdirectory under ``.kb/improve/<run_id>/`` to
+    hold the run summary and append-only iteration log.
+    """
+    path = os.path.join(root, IMPROVE_DIR, run_id)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _config_path(root: str) -> str:
