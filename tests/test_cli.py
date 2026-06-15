@@ -7,7 +7,14 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from kb import models as registry  # noqa: F401 — used by TestModelsShowEvalScores
 from kb.cli import main
+from kb.core import DOC_DIR, RECORDS_DIR, shard_path  # noqa: F401 — Phase 13.2 tests
+from kb.index import (  # noqa: F401 — used by TestHealthModelsFlag
+    index_document,
+    index_path,
+    init_db,
+)
 
 
 class TestInit:
@@ -910,6 +917,490 @@ class TestFinetuneCommandInvocations:
             assert result.exit_code == 0
             assert "kb-rag" in result.output
             assert "kb-finetune" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.2: kb evaluate and kb health --models
+# ---------------------------------------------------------------------------
+
+
+def _write_analyzed_doc(root, ulid, *, body="doc body", title="t"):
+    """Write a doc with an analysis block so the eval pipeline picks it up."""
+    rel = shard_path(ulid)
+    abs_dir = os.path.join(root, RECORDS_DIR, DOC_DIR, os.path.dirname(rel))
+    os.makedirs(abs_dir, exist_ok=True)
+    abs_path = os.path.join(root, RECORDS_DIR, DOC_DIR, rel)
+    text = (
+        f"---\nid: {ulid}\ntitle: {title}\nsource_type: web\n"
+        f"analysis:\n  analyzer_version: analyzer_v1\n"
+        f"  confidence: 0.8\n  importance: 0.5\n---\n\n{body}\n"
+    )
+    with open(abs_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return abs_path
+
+
+def _patched_eval_agent(side_effect_json):
+    """Mock kb.evaluate.call_agent to return a canned JSON string.
+
+    The canned response must satisfy parse_analysis_response: title, summary,
+    key_points, primary_concepts (with id/label), candidate_concepts,
+    display_tags, entities, confidence, importance.
+    """
+    return patch("kb.evaluate.call_agent", side_effect=side_effect_json)
+
+
+def _canned_eval_response(prompt):
+    """Default canned response for evaluate tests; importance=0.5."""
+    return json.dumps({
+        "title": "x", "summary": "a summary",
+        "why_important": "x", "key_points": [],
+        "primary_concepts": [{"id": "rag", "label": "rag"}],
+        "candidate_concepts": [],
+        "display_tags": [], "entities": [],
+        "confidence": 0.9, "importance": 0.5,
+    })
+
+
+class TestEvaluateCLI:
+    def test_evaluate_requires_init(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, [
+                "evaluate", "--baseline", "a", "--candidate", "b",
+            ])
+            assert result.exit_code == 1
+            assert "Not in a knowledge bucket" in result.output
+
+    def test_evaluate_json_with_mocks(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        # Add two analyzed docs so the pipeline picks them up.
+        for ulid in ("01HEVAL00000000000000AAAA",
+                     "01HEVAL00000000000000BBBB"):
+            _write_analyzed_doc(root, ulid)
+
+        with _patched_eval_agent(_canned_eval_response):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 2, "5": 0},
+                    "judge_failures": 0,
+                    "judge_per_doc": [
+                        {"doc_id": "01HEVAL00000000000000AAAA",
+                         "score": 4, "reasoning": "ok"},
+                        {"doc_id": "01HEVAL00000000000000BBBB",
+                         "score": 4, "reasoning": "ok"},
+                    ],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                result = runner.invoke(main, [
+                    "evaluate",
+                    "--baseline", "base-x",
+                    "--candidate", "cand-x",
+                    "--json",
+                ], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["baseline"] == "base-x"
+        assert data["candidate"] == "cand-x"
+        m = data["metrics"]
+        for k in ("concept_jaccard_mean", "concept_f1_mean",
+                  "importance_kl", "baseline_failure_rate",
+                  "candidate_failure_rate"):
+            assert k in m, f"missing metric: {k}"
+
+    def test_evaluate_text_summary(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        _write_analyzed_doc(root, "01HEVAL00000000000000CCCC")
+
+        with _patched_eval_agent(_canned_eval_response):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 3.0, "judge_score_median": 3,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 1, "4": 0, "5": 0},
+                    "judge_failures": 0, "judge_per_doc": [],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                result = runner.invoke(main, [
+                    "evaluate", "--baseline", "b1", "--candidate", "c1",
+                ], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        # Text summary must contain the headline metrics and the report path.
+        assert "Docs evaluated:" in result.output
+        assert "concept_jaccard_mean" in result.output
+        assert "Report saved: .kb/models/eval/c1.json" in result.output
+
+    def test_evaluate_persists_report_file(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        _write_analyzed_doc(root, "01HEVAL00000000000000DDDD")
+
+        with _patched_eval_agent(_canned_eval_response):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 1, "5": 0},
+                    "judge_failures": 0, "judge_per_doc": [],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                result = runner.invoke(main, [
+                    "evaluate", "--baseline", "b2", "--candidate", "c2",
+                    "--json",
+                ], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        eval_path = os.path.join(root, ".kb", "models", "eval", "c2.json")
+        assert os.path.isfile(eval_path)
+        with open(eval_path, encoding="utf-8") as f:
+            stored = json.load(f)
+        assert stored["model_id"] == "c2"
+        assert stored["baseline"] == "b2"
+        assert "metrics" in stored
+
+    def test_evaluate_no_cache_passes_through(self, tmp_path, monkeypatch):
+        """The --no-cache flag should reach run_eval as use_cache=False."""
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        _write_analyzed_doc(root, "01HEVAL00000000000000EEEE")
+
+        with _patched_eval_agent(_canned_eval_response):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 1, "5": 0},
+                    "judge_failures": 0, "judge_per_doc": [],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                result = runner.invoke(main, [
+                    "evaluate", "--baseline", "b3", "--candidate", "c3",
+                    "--no-cache", "--json",
+                ], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["cache_used"] is False
+
+
+class TestHealthModelsFlag:
+    def test_health_models_flag_outside_bucket_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["health", "--models"])
+            assert result.exit_code == 1
+            assert "Not in a knowledge bucket" in result.output
+
+    def test_health_models_json_emits_model_evals_key(self, tmp_path,
+                                                      monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        # Build a minimal index so compute_health has something to read.
+        conn = init_db(index_path(root))
+        index_document(conn, "doc1", "Doc1", None, "web", "r/doc1.md", "x")
+        conn.close()
+
+        # Build a fake eval report on disk.
+        eval_dir = os.path.join(root, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "cand-x.json"), "w") as f:
+            json.dump({
+                "model_id": "cand-x",
+                "baseline": "base-x",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 5,
+                "metrics": {
+                    "concept_jaccard_mean": 0.7,
+                    "concept_f1_mean": 0.8,
+                    "importance_kl": 0.05,
+                    "judge_score_mean": 4.0,
+                },
+            }, f)
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["health", "--models", "--json"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "model_evals" in data
+        assert len(data["model_evals"]) == 1
+        assert data["model_evals"][0]["model_id"] == "cand-x"
+        m = data["model_evals"][0]["metrics"]
+        assert m["concept_jaccard_mean"] == 0.7
+        assert m["concept_f1_mean"] == 0.8
+
+    def test_health_models_text_summary(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        conn = init_db(index_path(root))
+        index_document(conn, "doc1", "Doc1", None, "web", "r/doc1.md", "x")
+        conn.close()
+        eval_dir = os.path.join(root, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "cand-z.json"), "w") as f:
+            json.dump({
+                "model_id": "cand-z",
+                "baseline": "base-z",
+                "judged_at": "2026-06-15T13:00:00Z",
+                "n_docs": 3,
+                "metrics": {
+                    "concept_jaccard_mean": 0.5,
+                    "concept_f1_mean": 0.6,
+                    "importance_kl": 0.1,
+                    "judge_score_mean": 3.5,
+                },
+            }, f)
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["health", "--models"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        assert "Model Eval Scores" in result.output
+        assert "cand-z" in result.output
+        assert "base-z" in result.output
+
+    def test_health_models_text_no_records(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        conn = init_db(index_path(root))
+        index_document(conn, "doc1", "Doc1", None, "web", "r/doc1.md", "x")
+        conn.close()
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["health", "--models"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        assert "no eval reports found" in result.output
+
+
+class TestModelsShowEvalScores:
+    def test_models_show_eval_block_when_present(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        registry.add("kb-rag-v1", base_model="claude-opus-4-7",
+                     dataset_path="d", backend="openai_ft", root=root)
+        eval_dir = os.path.join(root, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "kb-rag-v1.json"), "w") as f:
+            json.dump({
+                "model_id": "kb-rag-v1",
+                "baseline": "opus-45",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 7,
+                "metrics": {
+                    "concept_jaccard_mean": 0.6,
+                    "concept_f1_mean": 0.7,
+                    "importance_kl": 0.04,
+                    "judge_score_mean": 3.8,
+                },
+            }, f)
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["models", "show", "kb-rag-v1"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        assert "--- eval scores ---" in result.output
+        assert "concept_jaccard_mean: 0.6" in result.output
+        assert "judge_score_mean:     3.8" in result.output
+        assert "baseline:  opus-45" in result.output
+
+    def test_models_show_json_includes_eval_when_present(self, tmp_path,
+                                                         monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        registry.add("kb-rag-v2", base_model="claude-opus-4-7",
+                     dataset_path="d", backend="openai_ft", root=root)
+        eval_dir = os.path.join(root, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "kb-rag-v2.json"), "w") as f:
+            json.dump({
+                "model_id": "kb-rag-v2",
+                "baseline": "opus-45",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 2,
+                "metrics": {"concept_jaccard_mean": 0.5},
+            }, f)
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["models", "show", "kb-rag-v2", "--json"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["model"]["id"] == "kb-rag-v2"
+        assert "eval" in data
+        assert data["eval"]["model_id"] == "kb-rag-v2"
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.2 follow-up: kb evaluate extra CLI surface
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateRequiredFlags:
+    def test_evaluate_requires_baseline(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["evaluate", "--candidate", "b"])
+            assert result.exit_code == 2  # click missing-option
+            assert "--baseline" in result.output
+
+    def test_evaluate_requires_candidate(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, ["evaluate", "--baseline", "a"])
+            assert result.exit_code == 2
+            assert "--candidate" in result.output
+
+    def test_evaluate_missing_reference_file_errors(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(main, ["init", "."])
+            result = runner.invoke(main, [
+                "evaluate",
+                "--baseline", "base-x",
+                "--candidate", "cand-x",
+                "--reference", "/no/such/file.jsonl",
+            ])
+            # Click validates `exists=True` and exits 2 with usage error.
+            assert result.exit_code == 2
+            assert "reference" in result.output.lower() or "FILE" in result.output
+
+
+class TestEvaluateCachingBehavior:
+    """Caching guarantees for the ``kb evaluate`` CLI path.
+
+    The first invocation should call ``call_agent`` for each (model, doc)
+    pair; the second invocation, given an identical CLI, must be served
+    entirely from the on-disk cache at ``.kb/models/eval/cache/<model>/``.
+    """
+
+    def _two_docs_setup(self, tmp_path, monkeypatch):
+        root = str(tmp_path)
+        monkeypatch.chdir(root)
+        _write_analyzed_doc(root, "01HEVAL0000000000000CACHE1")
+        _write_analyzed_doc(root, "01HEVAL0000000000000CACHE2")
+
+    def test_evaluate_second_invocation_uses_cache(self, tmp_path,
+                                                    monkeypatch):
+        self._two_docs_setup(tmp_path, monkeypatch)
+
+        def _cached_canned(*args, **kwargs):
+            # Accept (prompt, model=...) signature from call_agent.
+            return _canned_eval_response(args[0] if args else "")
+
+        # First run — populates cache, no pre-existing cache files.
+        with patch("kb.evaluate.call_agent", side_effect=_cached_canned):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 2, "5": 0},
+                    "judge_failures": 0,
+                    "judge_per_doc": [],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                first = runner.invoke(main, [
+                    "evaluate", "--baseline", "cache-base",
+                    "--candidate", "cache-cand", "--json",
+                ], catch_exceptions=False)
+        assert first.exit_code == 0, first.output
+
+        cache_dir = os.path.join(
+            str(tmp_path), ".kb", "models", "eval", "cache",
+        )
+        # Both models have a cache subdir after the first run.
+        assert os.path.isdir(os.path.join(cache_dir, "cache-base"))
+        assert os.path.isdir(os.path.join(cache_dir, "cache-cand"))
+
+        # Second run — patch call_agent to raise; the cache should
+        # bypass it entirely.  (The judge is still mocked, but the
+        # analyze path is the one we're proving is cached.)
+        def _boom(*args, **kwargs):
+            raise AssertionError("call_agent was called; cache miss!")
+
+        with patch("kb.evaluate.call_agent", side_effect=_boom):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 2, "5": 0},
+                    "judge_failures": 0, "judge_per_doc": [],
+                },
+            ):
+                second = runner.invoke(main, [
+                    "evaluate", "--baseline", "cache-base",
+                    "--candidate", "cache-cand", "--json",
+                ], catch_exceptions=False)
+        assert second.exit_code == 0, second.output
+        data = json.loads(second.output)
+        assert data["cache_used"] is True
+        # Two docs found, both pairs survived the cached replay.
+        assert data["n_docs"] == 2
+
+    def test_evaluate_no_cache_flag_bypasses_cache(self, tmp_path,
+                                                    monkeypatch):
+        self._two_docs_setup(tmp_path, monkeypatch)
+
+        call_count = {"n": 0}
+
+        def _counting_agent(*args, **kwargs):
+            call_count["n"] += 1
+            return _canned_eval_response(args[0] if args else "")
+
+        # First run with --no-cache to count calls; then run again with
+        # the same flag to confirm call_agent fires both times.
+        with patch("kb.evaluate.call_agent", side_effect=_counting_agent):
+            with patch(
+                "kb.evaluate._compute_judge_scores",
+                return_value={
+                    "judge_score_mean": 4.0, "judge_score_median": 4,
+                    "judge_score_dist": {"1": 0, "2": 0, "3": 0, "4": 1, "5": 0},
+                    "judge_failures": 0, "judge_per_doc": [],
+                },
+            ):
+                runner = CliRunner()
+                runner.invoke(main, ["init", "."])
+                first = runner.invoke(main, [
+                    "evaluate", "--baseline", "nc-base",
+                    "--candidate", "nc-cand",
+                    "--no-cache", "--json",
+                ], catch_exceptions=False)
+                second = runner.invoke(main, [
+                    "evaluate", "--baseline", "nc-base",
+                    "--candidate", "nc-cand",
+                    "--no-cache", "--json",
+                ], catch_exceptions=False)
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        first_data = json.loads(first.output)
+        second_data = json.loads(second.output)
+        assert first_data["cache_used"] is False
+        assert second_data["cache_used"] is False
+        # Two docs * two models per run * two runs = 8 calls minimum.
+        assert call_count["n"] >= 8
 
 
 # (no extra imports needed at the bottom — see top-of-file imports)

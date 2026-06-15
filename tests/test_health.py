@@ -322,3 +322,251 @@ class TestHealthWebUI:
         rules = [r.rule for r in app.url_map.iter_rules()]
         assert "/health" in rules
         assert "/api/health" in rules
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.2: kb health --models
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+class TestHealthWithModels:
+    def test_compute_health_omits_model_evals_by_default(self, kb):
+        """Default compute_health does not include model_evals."""
+        _index_doc(kb, "doc1", "Doc1")
+        report = compute_health(kb)
+        assert "model_evals" not in report
+
+    def test_compute_health_with_models_true_includes_key(self, kb):
+        """with_models=True adds a model_evals key (possibly empty)."""
+        _index_doc(kb, "doc1", "Doc1")
+        report = compute_health(kb, with_models=True)
+        assert "model_evals" in report
+        assert report["model_evals"] == []
+
+    def test_compute_health_with_models_surfaces_eval_records(self, kb):
+        """A real eval report under .kb/models/eval/ is surfaced."""
+        _index_doc(kb, "doc1", "Doc1")
+        eval_dir = os.path.join(kb, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "cand-a.json"), "w") as f:
+            _json.dump({
+                "model_id": "cand-a",
+                "baseline": "base-a",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 3,
+                "metrics": {
+                    "concept_jaccard_mean": 0.6,
+                    "concept_f1_mean": 0.7,
+                    "importance_kl": 0.04,
+                    "judge_score_mean": 3.8,
+                },
+            }, f)
+        with open(os.path.join(eval_dir, "cand-b.json"), "w") as f:
+            _json.dump({
+                "model_id": "cand-b",
+                "baseline": "base-b",
+                "judged_at": "2026-06-14T09:00:00Z",
+                "n_docs": 2,
+                "metrics": {
+                    "concept_jaccard_mean": 0.5,
+                    "concept_f1_mean": 0.65,
+                    "importance_kl": 0.1,
+                    "judge_score_mean": 4.2,
+                },
+            }, f)
+
+        report = compute_health(kb, with_models=True)
+        evals = report["model_evals"]
+        assert len(evals) == 2
+        # Sorted by judged_at desc — cand-a (06-15) before cand-b (06-14).
+        assert evals[0]["model_id"] == "cand-a"
+        assert evals[1]["model_id"] == "cand-b"
+        # Headline metrics surfaced.
+        m = evals[0]["metrics"]
+        assert m["concept_jaccard_mean"] == 0.6
+        assert m["concept_f1_mean"] == 0.7
+        assert m["importance_kl"] == 0.04
+        assert m["judge_score_mean"] == 3.8
+        # n_docs and baseline are surfaced too.
+        assert evals[0]["n_docs"] == 3
+        assert evals[0]["baseline"] == "base-a"
+
+    def test_compute_health_with_models_skips_unreadable(self, kb):
+        """Unreadable eval files do not break the report."""
+        _index_doc(kb, "doc1", "Doc1")
+        eval_dir = os.path.join(kb, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        # Write a corrupt JSON file.
+        with open(os.path.join(eval_dir, "bad.json"), "w") as f:
+            f.write("not json")
+        # And a valid one to make sure we still get a record.
+        with open(os.path.join(eval_dir, "good.json"), "w") as f:
+            _json.dump({
+                "model_id": "good",
+                "baseline": "base-x",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 1,
+                "metrics": {"concept_jaccard_mean": 0.1},
+            }, f)
+
+        report = compute_health(kb, with_models=True)
+        evals = report["model_evals"]
+        ids = {e["model_id"] for e in evals}
+        assert "good" in ids
+        assert "bad" not in ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.2 follow-up: kb health --models edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestHealthModelsEvalDirMissing:
+    """When .kb/models/eval/ does not exist, model_evals must be [] (not absent)."""
+
+    def test_compute_health_with_models_dir_missing(self, kb):
+        _index_doc(kb, "doc1", "Doc1")
+        # No eval_dir is created — simulating a fresh bucket.
+        report = compute_health(kb, with_models=True)
+        assert "model_evals" in report
+        assert report["model_evals"] == []
+
+    def test_compute_health_with_models_dir_empty(self, kb):
+        _index_doc(kb, "doc1", "Doc1")
+        # Empty eval_dir (created but no records).
+        eval_dir = os.path.join(kb, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        report = compute_health(kb, with_models=True)
+        assert "model_evals" in report
+        assert report["model_evals"] == []
+
+
+class TestHealthModelsJsonShape:
+    """The eval record shape surfaced from compute_health is JSON-serializable."""
+
+    def test_compute_health_model_evals_json_round_trip(self, kb):
+        _index_doc(kb, "doc1", "Doc1")
+        eval_dir = os.path.join(kb, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "jsonrt.json"), "w") as f:
+            _json.dump({
+                "model_id": "jsonrt",
+                "baseline": "base-jsonrt",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 4,
+                "metrics": {
+                    "concept_jaccard_mean": 0.65,
+                    "concept_f1_mean": 0.75,
+                    "importance_kl": 0.02,
+                    "judge_score_mean": 4.1,
+                },
+            }, f)
+
+        report = compute_health(kb, with_models=True)
+        # Round-tripping through json.dumps must succeed (the surfaced
+        # record contains only JSON-native types).
+        blob = _json.dumps(report["model_evals"], sort_keys=True)
+        decoded = _json.loads(blob)
+        assert decoded[0]["model_id"] == "jsonrt"
+        # Headline metrics all present and numerically preserved.
+        m = decoded[0]["metrics"]
+        assert m["concept_jaccard_mean"] == 0.65
+        assert m["concept_f1_mean"] == 0.75
+        assert m["importance_kl"] == 0.02
+        assert m["judge_score_mean"] == 4.1
+
+    def test_compute_health_model_evals_includes_graph_metrics(self, kb):
+        """When with_models=True, the report still carries the full health
+        payload — the eval section is additive, not a replacement."""
+        doc_id = _add_doc(kb, title="Doc", concepts=["rag"])
+        _index_doc(kb, doc_id, "Doc")
+        _setup_graph(kb, doc_id, concepts=["rag"])
+
+        eval_dir = os.path.join(kb, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "graphy.json"), "w") as f:
+            _json.dump({
+                "model_id": "graphy",
+                "baseline": "base-g",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 1,
+                "metrics": {"concept_jaccard_mean": 0.5},
+            }, f)
+
+        report = compute_health(kb, with_models=True)
+        # Both the graph health section and the new models section are present.
+        assert "overview" in report
+        assert "metrics" in report
+        assert "model_evals" in report
+        assert report["overview"]["total_documents"] == 1
+        assert report["model_evals"][0]["model_id"] == "graphy"
+
+
+class TestHealthModelsCLIRoundTrip:
+    """`kb health --models --json` round-trips the model_evals list."""
+
+    def test_health_models_json_lists_surfaced_records(self, kb, monkeypatch):
+        import os
+
+        from click.testing import CliRunner
+
+        from kb.cli import main
+
+        root = kb
+        monkeypatch.chdir(root)
+        # Build a minimal index inside the bucket.
+        from kb.index import index_path
+        conn = init_db(index_path(root))
+        index_document(conn, "doc1", "Doc1", None, "web", "r/doc1.md", "x")
+        conn.close()
+
+        eval_dir = os.path.join(root, ".kb", "models", "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "ci1.json"), "w") as f:
+            _json.dump({
+                "model_id": "ci1",
+                "baseline": "base-ci1",
+                "judged_at": "2026-06-15T12:00:00Z",
+                "n_docs": 9,
+                "metrics": {
+                    "concept_jaccard_mean": 0.4,
+                    "concept_f1_mean": 0.55,
+                    "importance_kl": 0.07,
+                    "judge_score_mean": 3.9,
+                },
+            }, f)
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["health", "--models", "--json"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert "model_evals" in data
+        ids = [e["model_id"] for e in data["model_evals"]]
+        assert "ci1" in ids
+        m = data["model_evals"][0]["metrics"]
+        assert m["concept_jaccard_mean"] == 0.4
+        assert m["importance_kl"] == 0.07
+
+    def test_health_models_json_when_no_evals(self, kb, monkeypatch):
+        """`kb health --models --json` returns model_evals=[] when no records."""
+        from click.testing import CliRunner
+
+        from kb.cli import main
+
+        monkeypatch.chdir(kb)
+        from kb.index import index_path
+        conn = init_db(index_path(kb))
+        index_document(conn, "doc1", "Doc1", None, "web", "r/doc1.md", "x")
+        conn.close()
+
+        runner = CliRunner()
+        runner.invoke(main, ["init", "."])
+        result = runner.invoke(main, ["health", "--models", "--json"],
+                               catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data.get("model_evals") == []
