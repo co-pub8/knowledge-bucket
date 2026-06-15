@@ -1030,14 +1030,16 @@ def analyze(doc_id: str | None, raw_json: bool, retry_failed: bool, workers: int
 
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def health(as_json: bool):
+@click.option("--models", "with_models", is_flag=True,
+              help="Include model eval scores from .kb/models/eval/.")
+def health(as_json: bool, with_models: bool):
     """Show graph health metrics and quality indicators."""
     root = kb_root()
     if root is None:
         click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
         raise SystemExit(1)
 
-    report = compute_health(root)
+    report = compute_health(root, with_models=with_models)
     if "error" in report:
         click.echo(report["error"], err=True)
         raise SystemExit(1)
@@ -1092,6 +1094,31 @@ def health(as_json: bool):
 
     if report["concepts_missing_notes"] > 0:
         click.echo(f"Concepts missing notes (df>=2): {report['concepts_missing_notes']}")
+
+    if with_models:
+        evals = report.get("model_evals", [])
+        click.echo("--- Model Eval Scores ---")
+        if not evals:
+            click.echo("  (no eval reports found in .kb/models/eval/)")
+        else:
+            click.echo(f"  {'MODEL':<24}{'BASELINE':<24}{'N':>5}  JACC  F1     KL     JUDGE")
+            for er in evals:
+                m = er.get("metrics") or {}
+                j = m.get("concept_jaccard_mean")
+                f1 = m.get("concept_f1_mean")
+                kl = m.get("importance_kl")
+                js = m.get("judge_score_mean")
+                j_str = f"{j:.2f}" if isinstance(j, (int, float)) else "-"
+                f1_str = f"{f1:.2f}" if isinstance(f1, (int, float)) else "-"
+                kl_str = f"{kl:.3f}" if isinstance(kl, (int, float)) else "-"
+                js_str = f"{js:.2f}" if isinstance(js, (int, float)) else "-"
+                n = er.get("n_docs")
+                n_str = str(n) if n is not None else "-"
+                click.echo(
+                    f"  {er.get('model_id',''):<24}"
+                    f"{str(er.get('baseline') or '-'):<24}"
+                    f"{n_str:>5}  {j_str:<5} {f1_str:<5} {kl_str:<6} {js_str}"
+                )
 
 
 @main.command()
@@ -1646,7 +1673,18 @@ def models_cmd(subcommand, model_id, as_json, tag, add_base_model,
             )
             raise SystemExit(1)
         if as_json:
-            click.echo(json.dumps(rec, ensure_ascii=False, indent=2))
+            # Include the eval report alongside the model record when one
+            # exists; the schema in the JSON is documented in
+            # ``kb/evaluate.py`` (``run_eval`` return value).
+            eval_path = os.path.join(root, ".kb", "models", "eval",
+                                     f"{model_id}.json")
+            if os.path.exists(eval_path):
+                with open(eval_path, encoding="utf-8") as _f:
+                    eval_data = json.load(_f)
+                click.echo(json.dumps({"model": rec, "eval": eval_data},
+                                      ensure_ascii=False, indent=2))
+            else:
+                click.echo(json.dumps(rec, ensure_ascii=False, indent=2))
         else:
             for k in ("id", "display_name", "base_model", "backend",
                       "dataset_path", "provider_model_id", "provider_job_id",
@@ -1656,6 +1694,38 @@ def models_cmd(subcommand, model_id, as_json, tag, add_base_model,
             tags_list = rec.get("tags") or []
             if tags_list:
                 click.echo(f"tags: {', '.join(tags_list)}")
+
+            # Print the eval scores block when a report exists on disk.
+            eval_path = os.path.join(root, ".kb", "models", "eval",
+                                     f"{model_id}.json")
+            if os.path.exists(eval_path):
+                with open(eval_path, encoding="utf-8") as _f:
+                    eval_data = json.load(_f)
+                click.echo()
+                click.echo("--- eval scores ---")
+                if eval_data.get("judged_at"):
+                    click.echo(f"judged_at: {eval_data['judged_at']}")
+                if eval_data.get("baseline"):
+                    click.echo(f"baseline:  {eval_data['baseline']}")
+                if eval_data.get("n_docs") is not None:
+                    click.echo(f"n_docs:    {eval_data['n_docs']}")
+                metrics = eval_data.get("metrics") or {}
+                if "concept_jaccard_mean" in metrics:
+                    click.echo(
+                        f"concept_jaccard_mean: {metrics['concept_jaccard_mean']}"
+                    )
+                if "concept_f1_mean" in metrics:
+                    click.echo(
+                        f"concept_f1_mean:      {metrics['concept_f1_mean']}"
+                    )
+                if "importance_kl" in metrics:
+                    click.echo(
+                        f"importance_kl:        {metrics['importance_kl']}"
+                    )
+                if "judge_score_mean" in metrics:
+                    click.echo(
+                        f"judge_score_mean:     {metrics['judge_score_mean']}"
+                    )
         return
 
     if subcommand == "use":
@@ -1727,6 +1797,107 @@ def models_cmd(subcommand, model_id, as_json, tag, add_base_model,
         err=True,
     )
     raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Evaluate (Phase 13.2)
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--baseline", required=True,
+              help="Baseline model id (registered slug or upstream id).")
+@click.option("--candidate", required=True,
+              help="Candidate model id (registered slug or upstream id).")
+@click.option("--limit", type=int, default=None,
+              help="Max docs to evaluate (deterministic random sample).")
+@click.option("--reference", "reference_path", type=click.Path(exists=True),
+              default=None,
+              help="JSONL ground-truth file with doc_id + expected_* fields.")
+@click.option("--no-cache", "no_cache", is_flag=True,
+              help="Ignore cached per-(model, doc) analyses and re-run.")
+@click.option("--judge-model", "judge_model", default=None,
+              help="Override judge model id (default: env > config > proxy).")
+@click.option("--workers", type=int, default=4, show_default=True,
+              help="Parallel workers for LLM calls (analyze + judge).")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit the full eval report as JSON instead of a summary.")
+def evaluate_cmd(baseline, candidate, limit, reference_path, no_cache,
+                 judge_model, workers, as_json):
+    """Compare a CANDIDATE model against a BASELINE on analyzed docs.
+
+    Replays the analyzer prompt through each model (cached on disk at
+    ``.kb/models/eval/cache/<model>/<ulid>.json``) and computes four
+    headline metrics: concept Jaccard/F1, importance KL, LLM-as-judge
+    score (1-5), and failure rate. Persists the report to
+    ``.kb/models/eval/<candidate>.json`` via ``kb models eval_record``.
+
+    Sample determinism: the same (baseline, candidate) pair always
+    selects the same docs; pass ``--no-cache`` to ignore prior runs.
+    """
+    root = kb_root()
+    if root is None:
+        click.echo("Not in a knowledge bucket. Run 'kb init' first.", err=True)
+        raise SystemExit(1)
+
+    from . import evaluate as _evaluate
+
+    try:
+        report = _evaluate.run_eval(
+            baseline_model=baseline,
+            candidate_model=candidate,
+            root=root,
+            limit=limit,
+            reference_path=reference_path,
+            use_cache=not no_cache,
+            judge_model=judge_model,
+            workers=workers,
+        )
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    if as_json:
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    metrics = report.get("metrics") or {}
+    n_docs = report.get("n_docs", 0)
+    click.echo(f"=== Eval: {candidate} vs {baseline} ===")
+    click.echo()
+    click.echo(f"Docs evaluated:    {n_docs}")
+    click.echo(f"Limit:             {report.get('limit')}")
+    click.echo(f"Cache used:        {report.get('cache_used')}")
+    click.echo(f"Judge model:       {report.get('judge_model') or '(default)'}")
+    if report.get("judged_at"):
+        click.echo(f"Judged at:         {report['judged_at']}")
+    click.echo()
+    click.echo("--- Headline Metrics ---")
+    click.echo(
+        f"  concept_jaccard_mean: {metrics.get('concept_jaccard_mean')}"
+    )
+    click.echo(
+        f"  concept_f1_mean:      {metrics.get('concept_f1_mean')}"
+    )
+    click.echo(
+        f"  importance_kl:        {metrics.get('importance_kl')}"
+    )
+    jm = metrics.get("judge_score_mean")
+    click.echo(
+        f"  judge_score_mean:     {jm if jm is not None else '(no judge runs)'}"
+    )
+    click.echo(
+        f"  failure_rate_delta:  {metrics.get('failure_rate_delta')}"
+    )
+    failures = report.get("failures") or []
+    if failures:
+        click.echo()
+        click.echo(f"--- {len(failures)} failure(s) ---")
+        for f in failures[:10]:
+            click.echo(f"  {f.get('doc_id')} [{f.get('model')}]: {f.get('reason')}")
+        if len(failures) > 10:
+            click.echo(f"  ... and {len(failures) - 10} more")
+    click.echo()
+    click.echo(f"Report saved: .kb/models/eval/{candidate}.json")
 
 
 # ---------------------------------------------------------------------------
