@@ -1,17 +1,30 @@
 """Graph health metrics for knowledge bucket."""
 
+import json
 import os
 import sqlite3
+from typing import Any
 
 from .core import DOC_DIR, RECORDS_DIR
 from .graph import compute_hub_threshold, init_graph_tables
 from .index import _FM_RE, index_path
 
 
-def compute_health(root: str) -> dict:
+def compute_health(root: str, *, with_models: bool = False) -> dict:
     """Compute graph health metrics from the index database.
 
-    Returns a dict with overview stats, distributions, and quality indicators.
+    Args:
+        root: Bucket root path.
+        with_models: When True, also gather eval reports from
+            ``.kb/models/eval/*.json`` and add a ``model_evals`` key to
+            the report. The key is always present (an empty list) so
+            downstream consumers don't need to special-case "missing".
+
+    Returns:
+        A dict with overview stats, distributions, and quality indicators.
+        When ``with_models=True`` the returned dict also includes
+        ``model_evals`` (a list of {model_id, baseline, judged_at,
+        n_docs, metrics} records sorted by ``judged_at`` desc).
     """
     db_path = index_path(root)
     if not os.path.exists(db_path):
@@ -19,9 +32,13 @@ def compute_health(root: str) -> dict:
 
     conn = sqlite3.connect(db_path)
     try:
-        return _gather_metrics(conn, root)
+        report = _gather_metrics(conn, root)
     finally:
         conn.close()
+
+    if with_models:
+        report["model_evals"] = _gather_model_evals(root)
+    return report
 
 
 def _gather_metrics(conn: sqlite3.Connection, root: str) -> dict:
@@ -179,3 +196,69 @@ def _gather_metrics(conn: sqlite3.Connection, root: str) -> dict:
             "max_degree": max_degree,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Model eval reports (Phase 13.2)
+# ---------------------------------------------------------------------------
+
+# Headline metrics surfaced per eval record. These are the four metrics
+# the eval pipeline always computes; reference_* are excluded because
+# they are not part of every run.
+_HEADLINE_METRICS = (
+    "concept_jaccard_mean",
+    "concept_f1_mean",
+    "importance_kl",
+    "judge_score_mean",
+)
+
+
+def _gather_model_evals(root: str) -> list[dict[str, Any]]:
+    """Read ``.kb/models/eval/*.json`` and return a summary list.
+
+    Each entry has the shape:
+        ``{model_id, baseline, judged_at, n_docs, metrics}``
+
+    where ``metrics`` is itself a dict with the four headline metrics
+    (``concept_jaccard_mean``, ``concept_f1_mean``, ``importance_kl``,
+    ``judge_score_mean``). Records are sorted by ``judged_at`` desc
+    (most recent first); entries with no ``judged_at`` sort to the end.
+
+    An empty list is returned when the directory is missing or contains
+    no readable JSON files.
+    """
+    eval_dir = os.path.join(root, ".kb", "models", "eval")
+    if not os.path.isdir(eval_dir):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for entry in sorted(os.listdir(eval_dir)):
+        if not entry.endswith(".json"):
+            continue
+        path = os.path.join(eval_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            # Skip unreadable files but keep the rest.
+            import logging
+            logging.getLogger(__name__).warning(
+                "skipping unreadable eval file %s: %s", path, e)
+            continue
+        if not isinstance(rec, dict):
+            continue
+        model_id = rec.get("model_id") or os.path.splitext(entry)[0]
+        all_metrics = rec.get("metrics") or {}
+        metrics = {k: all_metrics.get(k) for k in _HEADLINE_METRICS}
+        out.append({
+            "model_id": model_id,
+            "baseline": rec.get("baseline"),
+            "judged_at": rec.get("judged_at"),
+            "n_docs": rec.get("n_docs"),
+            "metrics": metrics,
+        })
+
+    out.sort(key=lambda r: r.get("judged_at") or "", reverse=True)
+    return out
