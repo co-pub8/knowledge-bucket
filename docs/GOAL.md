@@ -13,25 +13,27 @@ kb-tools は **自分の corpus で fine-tune したモデルで自分の分析�
 
 ---
 
-## 現在の標的 — `git clone` から 5 分でフィードバックループを体感できる状態
+## 現在の標的 — `pip install kb-tools` で誰でもインストールできる最初のリリース
 
-**目標**: 新しいユーザーがリポジトリを clone して README のコマンドを順番に叩くと、5 分以内に「kb sft → kb evaluate → kb improve」が自分の目で動くことを確認できる。デモは実在のドメイン（例: ある OSS ライブラリのドキュメント）を使い、`examples/demo-bucket/` に同梱する。
+**目標**: 新しいユーザーが Python 3.11+ の venv を作り、`pip install kb-tools` だけで kb コマンドが手に入り、`kb init ~/my-knowledge && kb add --title t --content c && kb search t` が 1 分以内に動く。GitHub にリリースタグを打てば PyPI に自動公開され、API キーを手元に置かなくてよい。
 
 ### 完了基準
 
-1. `examples/demo-bucket/` に **実在ドメイン**（具体的なライブラリ・記事・論文）のサンプル doc が **10 件以上** 含まれる
-2. `examples/demo-bucket/.kb/index.db` が pre-built で、`git clone` 直後から `kb search` が動く
-3. `examples/demo.sh` が **1 コマンドで**「ingest → analyze → sft → evaluate → improve log」まで通しで実行できる（LLM 部分はモック可）
-4. `examples/README.md` に「何のデモか」「各ファイルの役割」「再現手順」が簡潔にまとまっている
-5. README.md の先頭に "Quick Demo" セクションがあり、`git clone && ./examples/demo.sh` で体験できる
-6. CI (`.github/workflows/tests.yml`) で `examples/demo.sh --smoke` を実行し、demo が壊れていないことを毎日確認する
-7. `docs/FEEDBACK_LOOP.md` §11 "Dogfooding notes" に、この demo を最初の事例としてリンクを貼る
+1. `pyproject.toml` が PyPI 公開に必要な全フィールドを備える: `description`, `readme`, `requires-python`, `license`, `authors`, `keywords`, `classifiers`, `urls` (Homepage / Repository / Issues / Changelog)
+2. `.github/workflows/release.yml`: `v*.*.*` タグ push で sdist + wheel を build、Trusted Publishing (OIDC) で PyPI に publish。API キーはリポジトリに保存しない
+3. Trusted Publishing を PyPI 側で設定 (GitHub Actions からのみ publish 許可)
+4. 初回リリースタグ `v0.2.0` を打ち、PyPI 上に `kb-tools` パッケージが出現
+5. 空の venv から `pip install kb-tools` が Python 3.11 / 3.12 / 3.13 すべてで成功し、`kb --version` がバージョン番号を返す
+6. CI ジョブ `install-smoke`: ビルド済み wheel を別 venv に install → `kb init` → `kb add` → `kb search` の smoke を matrix で毎日実行
+7. README.md のインストール手順が `pip install kb-tools` を **最上位** に据え、`pip install git+...` は dev 用の二次オプションに降格
 
 ### 範囲外 (今はやらない)
 
-- PyPI 公開・blog・告知。ユーザーに届ける経路は Phase 15 以降で別途
-- 実 fine-tune バックエンドの統合。demo は LLM をモックしてよい（実 LLM は任意の `--real-llm` フラグでのオプション）
-- 動画・スクリーンキャスト・多言語ドキュメント
+- 複数パッケージ分割 (`kb-tools-core` / `kb-tools-cli` 等)。単一パッケージのまま
+- Conda / Homebrew / apt。PyPI のみ
+- 自動バージョン bump / release-drafter の細かい自動化。タグは当面手で打つ
+- マーケティングサイト / blog 記事 / SNS 告知。それらは「最初のリリース」が手元に出てから別 workstream で
+- ユーザーテレメトリ・匿名の利用統計。何も送らない
 
 ---
 
@@ -39,7 +41,8 @@ kb-tools は **自分の corpus で fine-tune したモデルで自分の分析�
 
 | 次 | 内容 | 着手条件 |
 |---|---|---|
-| **配布・採用拡大 (旧 Phase 15 後半)** | PyPI 公開、blog、告知。demo を landing page に貼る | demo が動く状態になってから |
+| **blog / 告知 / PyPI バッジ** | 初回リリースの announcement、ハンドラ、バッジ。`examples/demo-bucket/` を landing に | 上の 7 項目が達成されてから |
+| **実 dogfooding** | `kb improve --real-llm` を kb-tools 自身の corpus で走らせ、`docs/FEEDBACK_LOOP.md` §11 に run_id を貼る | PyPI リリースが落ち着いた後 |
 | **規模化 (旧 Phase 8)** | 16 shard 分割、30 万文書 / 5 GB 対応 | ユーザー規模が要件を満たしたら |
 | **Web UI 刷新** | Next.js / グラフ可視化 | CLI で詰まる具体的なユースケースが出てから |
 
