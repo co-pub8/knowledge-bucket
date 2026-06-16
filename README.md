@@ -4,20 +4,18 @@ Web記事、GitHubリポジトリ、論文、メモ、PDF、動画をGitに蓄�
 
 ## インストール
 
-`kb-tools` は [PyPI](https://pypi.org/project/kb-tools/) からインストールできます。
+このリポジトリは **完全プライベート** で運用しています（[`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) 参照）。
+PyPI 公開も `pip install kb-tools` でのインストールもできません。共同開発者は以下から始めます。
 
 ```bash
-# PyPI から（推奨）
-pip install kb-tools
-
-# Embedding ベースのセマンティック検索を使う場合
-pip install "kb-tools[embedding]"
+git clone <内部 Git ホスト>/nobu007/knowledge-bucket.git
+cd knowledge-bucket
 
 # 開発モード（リポジトリを clone している場合）
 pip install -e ".[dev]"
 
-# 最新の未リリース版（本番非推奨）
-pip install git+https://github.com/nobu007/knowledge-bucket.git
+# Embedding ベースのセマンティック検索を使う場合
+pip install -e ".[embedding]"
 ```
 
 インストール後は `kb --version` で確認できます。
