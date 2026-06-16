@@ -1,0 +1,17 @@
+include README.md
+include LICENSE
+include CHANGELOG.md
+include pyproject.toml
+
+recursive-include src/kb/prompts *.md
+
+# Exclude common build / VCS noise from sdist
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .pytest_cache
+global-exclude .ruff_cache
+global-exclude .mypy_cache
+global-exclude .coverage*
+prune tests
+prune docs
+prune examples
