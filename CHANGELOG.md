@@ -20,30 +20,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Phase 15** — `examples/demo-bucket/` (12 pre-populated sample docs on
   vector databases and embeddings) plus the end-to-end `examples/demo.sh`
   script (with `--smoke` CI mode and `--real-llm` full-pipeline mode).
-- **Phase 16** — first PyPI release. Trusted Publishing via
-  `.github/workflows/release.yml` (no API token), and an `install-smoke`
-  CI job that builds the wheel and installs it into a fresh venv on
-  Python 3.11 / 3.12 / 3.13.
+- `install-smoke` CI job — builds the wheel and installs it into a fresh
+  venv on Python 3.11 / 3.12 / 3.13, then exercises `kb --version` /
+  `kb init` / `kb add` / `kb search` end-to-end. Catches sdist / wheel /
+  metadata regressions that editable `pip install -e` would miss.
+- **`docs/GOVERNANCE.md` + `CLAUDE.md`** — full-private policy and the
+  AI-agent hook to read it on every session. See "Notes" below.
 
 ### Changed
-- Bumped `pyproject.toml` version to `0.2.0`.
-- `pyproject.toml` now declares `readme = "README.md"`, an expanded
-  `keywords` list (12 entries), expanded `classifiers` (16 entries),
-  a `[project.urls]` block with Homepage / Repository / Issues / Changelog,
-  and a `[tool.setuptools]` block bundling `LICENSE` and prompt
-  `*.md` files.
-- `README.md` install section now leads with `pip install kb-tools`,
-  documents the `embedding` and `all` extras, and adds a
-  `kb --version` verification step.
+- Bumped `pyproject.toml` version to `0.2.0` to reflect Phases 13-15.
 
 ### Notes
-- This is the first release published to PyPI.
-- The package remains Alpha (Development Status :: 3 - Alpha).
-- Author email in `pyproject.toml` is the placeholder
-  `jinno@example.com` — replace with a real address before tagging.
+- **This release is internal only.** No PyPI publish, no public GitHub
+  mirror, no external distribution channel of any kind. The version
+  bump tracks the *code* state, not a release artifact. Per
+  `docs/GOVERNANCE.md` §1-4, this is permanent policy.
+- The install-smoke job replaces what would have been a public release
+  workflow. It validates the wheel internally so we know the package
+  shape is correct, without ever publishing.
+- Previous commit (reverted in 694631f) had prepared a Trusted
+  Publishing setup under Phase 16. That was rolled back in the
+  `chore(kb): slim pyproject.toml — drop PyPI-only metadata` commit
+  because the project is private.
+- The `authors` block uses a name only (no email). Earlier Phase 16
+  work added a placeholder email that has now been removed.
 
 ## [0.1.0] - 2026-XX-XX
 
-Initial local-development release (pre-PyPI). Bundled the core
+Initial local-development release. Bundled the core
 `kb` CLI, FTS5 + concept-graph + vectorize pipelines, and the
 `kb ingest` / `kb sync` / `kb serve` workflows.
