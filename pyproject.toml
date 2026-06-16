@@ -1,19 +1,47 @@
 [project]
 name = "kb-tools"
-version = "0.1.0"
-description = "Git-backed knowledge management CLI — add, index, search, and analyze documents locally"
+version = "0.2.0"
+description = "A local-first, Markdown-native knowledge bucket CLI with embedded RAG, fine-tuning, and evaluation workflows."
+readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = { text = "MIT" }
+keywords = [
+    "knowledge-base",
+    "knowledge-management",
+    "rag",
+    "retrieval-augmented-generation",
+    "vector-search",
+    "markdown",
+    "fine-tuning",
+    "sft",
+    "sqlite",
+    "fts5",
+    "llm",
+    "cli",
+]
 authors = [
-    { name = "nobu007" },
+    { name = "jinno", email = "jinno@example.com" },
+]
+maintainers = [
+    { name = "jinno", email = "jinno@example.com" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Indexing",
+    "Topic :: Text Processing :: Markup :: Markdown",
     "Topic :: Utilities",
+    "Typing :: Typed",
 ]
 dependencies = [
     "click>=8.0",
@@ -23,7 +51,10 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/nobu007/knowledge-bucket"
 Repository = "https://github.com/nobu007/knowledge-bucket"
+Issues = "https://github.com/nobu007/knowledge-bucket/issues"
+Changelog = "https://github.com/nobu007/knowledge-bucket/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -50,6 +81,10 @@ kb = "kb.cli:main"
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+license-files = ["LICENSE"]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -65,3 +100,6 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (build + venv install; opt-in via -m slow)",
+]
