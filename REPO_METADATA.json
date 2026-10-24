@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "verified_at": "2026-10-24T14:59:08Z",
+  "verified_at": "2026-10-24T18:46:21Z",
   "long_term": {
     "summary": "自己強化型ナレッジ管理システムkb-toolsの長期計画。正本(不変ID付きMarkdown)と再生成可能キャッシュの原則下で、第1段階=自己corpusでのフィードバックループ1サイクル完走、第2段階=2周連続改善のe2e証明、以後corpus拡大・規模化・Web UI刷新。全段階はGOVERNANCEの完全プライベート制約内で進める。",
     "source": "ORDER.md",
