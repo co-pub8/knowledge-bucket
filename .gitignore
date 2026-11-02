@@ -21,6 +21,9 @@ __pycache__/
 .mypy_cache/
 .claude/worktrees/
 
+# === local editor / agent tool scratch ===
+.serena/
+
 # === Python build / packaging artifacts ===
 *.egg-info/
 *.egg
