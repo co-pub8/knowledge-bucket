@@ -1,0 +1,6 @@
+records_dir: records
+doc_dir: doc
+concept_dir: concept
+inbox_dir: inbox
+shard_depth: 2
+agent_model: kb-rag-v1
