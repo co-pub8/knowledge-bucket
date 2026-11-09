@@ -130,6 +130,22 @@ class TestPyprojectFields:
         for required in ("click", "flask", "pypdf", "pyyaml"):
             assert required in names, f"{required} missing from dependencies"
 
+    def test_pytest_pythonpath_includes_src(self, pyproject_data: dict):
+        """The suite must collect from a source checkout, installed or not.
+
+        ``[tool.pytest.ini_options] pythonpath`` puts ``src/`` on
+        ``sys.path`` for the test session, so ``import kb`` resolves even
+        when the package was never pip-installed. Without it, a pytest
+        run in an environment that has not installed the package dies at
+        collection time with "ModuleNotFoundError: No module named 'kb'"
+        and every selected test is reported as unmatched.
+        """
+        ini = pyproject_data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+        assert "src" in ini.get("pythonpath", []), (
+            "[tool.pytest.ini_options] pythonpath must include 'src' so the "
+            "suite collects without `pip install -e .`"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Repo hygiene — nothing publish-shaped should be tracked
