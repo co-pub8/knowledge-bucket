@@ -158,19 +158,34 @@ step 5 "register baseline + candidate models"
 if [ "${DO_MODELS}" = "1" ]; then
   # The demo's two models are both 'external' (no real fine-tune happened);
   # they exist so `kb models list` is non-empty and `kb improve` can pick a
-  # candidate. --overwrite makes the script idempotent.
-  kb models add kb-rag-v1 \
+  # candidate.
+  #
+  # The demo bucket ships both registrations, so they are registered only when
+  # missing. Re-registering (`kb models add --overwrite`) rewrites the
+  # registration's timestamps, which used to modify the tracked
+  # examples/demo-bucket fixtures on every demo run — dirtying the working
+  # tree and changing a candidate's verification copy while its tests ran.
+  # Keeping an existing registration is what makes the demo idempotent on disk.
+  register_demo_model() {
+    local id="$1"
+    shift
+    local model_file="${BUCKET_DIR}/.kb/models/${id}.json"
+    if [ -f "${model_file}" ]; then
+      log "Registered model '${id}' -> ${model_file} (already registered — kept as shipped)"
+      return 0
+    fi
+    kb models add "${id}" "$@" || true
+  }
+  register_demo_model kb-rag-v1 \
     --base-model claude-opus-4-7 \
     --backend external \
     --notes "demo baseline (v1)" \
-    --tag demo --tag baseline \
-    --overwrite || true
-  kb models add kb-rag-v2 \
+    --tag demo --tag baseline
+  register_demo_model kb-rag-v2 \
     --base-model claude-opus-4-7 \
     --backend external \
     --notes "demo candidate (v2)" \
-    --tag demo --tag candidate \
-    --overwrite || true
+    --tag demo --tag candidate
   if [ "${MODE}" = "smoke" ]; then
     log "smoke: skipping 'kb models use' to leave the active model untouched"
   else

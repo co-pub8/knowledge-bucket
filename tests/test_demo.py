@@ -192,10 +192,10 @@ def demo_sh_help_output() -> subprocess.CompletedProcess:
 def demo_sh_smoke_output() -> subprocess.CompletedProcess:
     """Run ``bash examples/demo.sh --smoke`` once for the module.
 
-    The smoke run touches the demo bucket (it does ``kb models add``).
-    Per Phase 4 the script is idempotent (``--overwrite``), so re-runs
-    are safe. We still mark the bucket as a mutable fixture rather than
-    pinning its post-run state.
+    The smoke run touches the demo bucket (it does ``kb models add``
+    when a registration is missing). The script keeps an existing
+    registration as-is, so re-runs leave the shipped fixtures byte
+    identical and the bucket is effectively idempotent.
     """
     return subprocess.run(
         ["bash", str(DEMO_SH), "--smoke"],
@@ -321,3 +321,47 @@ class TestDemoSmokeSideEffects:
         # And the kb.yml should still be valid YAML after the run.
         with (bucket_copy / "config" / "kb.yml").open(encoding="utf-8") as f:
             yaml.safe_load(f)
+
+    def test_smoke_keeps_shipped_registrations_unchanged(self, tmp_path: Path):
+        """A demo run must not rewrite the shipped model registrations.
+
+        ``kb models add --overwrite`` re-stamps ``created_at`` /
+        ``updated_at`` on every registration. The demo used to re-register
+        the shipped models on each run, which rewrote the tracked
+        ``examples/demo-bucket/.kb/models/*.json`` fixtures. A dirty tracked
+        file also changes a candidate's verification copy while its tests
+        run, so the harness cannot bind the resulting evidence.
+        """
+        import shutil
+
+        bucket_copy = tmp_path / "demo-bucket"
+        shutil.copytree(DEMO_BUCKET, bucket_copy)
+
+        models_dir = bucket_copy / ".kb" / "models"
+        names = ["kb-rag-v1.json", "kb-rag-v2.json"]
+        before = {
+            name: (models_dir / name).read_bytes()
+            for name in names
+            if (models_dir / name).is_file()
+        }
+        assert before, f"no shipped registrations found in {models_dir}"
+
+        proc = subprocess.run(
+            ["bash", str(DEMO_SH), "--smoke"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(bucket_copy),
+            env=os.environ.copy(),
+        )
+        assert proc.returncode == 0, f"--smoke failed: stderr={proc.stderr!r}"
+
+        after = {
+            name: (models_dir / name).read_bytes()
+            for name in names
+            if (models_dir / name).is_file()
+        }
+        assert after == before, (
+            "demo.sh --smoke rewrote the shipped model registrations: "
+            f"{sorted(set(before) | set(after))}"
+        )
