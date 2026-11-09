@@ -6,8 +6,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from kb.cli import main
-from kb.storage import (
+# kb.cli imports click at module level; without it the storage tests cannot
+# even be collected, so skip the module instead of failing collection.
+pytest.importorskip(
+    "click",
+    reason="click is not installed in this environment",
+    exc_type=ImportError,
+)
+
+from kb.cli import main  # noqa: E402
+from kb.storage import (  # noqa: E402
     LocalStorage,
     S3Storage,
     get_raw,
