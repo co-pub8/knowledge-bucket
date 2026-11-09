@@ -331,13 +331,18 @@ class TestDemoSmokeSideEffects:
         ``examples/demo-bucket/.kb/models/*.json`` fixtures. A dirty tracked
         file also changes a candidate's verification copy while its tests
         run, so the harness cannot bind the resulting evidence.
+
+        ``demo.sh`` always works on the demo bucket *next to the script*
+        (it ``cd``s into it), so the script has to be copied together with
+        the bucket for the run to stay inside the tmp dir.
         """
         import shutil
 
-        bucket_copy = tmp_path / "demo-bucket"
-        shutil.copytree(DEMO_BUCKET, bucket_copy)
+        examples_copy = tmp_path / "examples"
+        shutil.copytree(EXAMPLES_DIR, examples_copy)
+        script = examples_copy / "demo.sh"
+        models_dir = examples_copy / "demo-bucket" / ".kb" / "models"
 
-        models_dir = bucket_copy / ".kb" / "models"
         names = ["kb-rag-v1.json", "kb-rag-v2.json"]
         before = {
             name: (models_dir / name).read_bytes()
@@ -347,11 +352,11 @@ class TestDemoSmokeSideEffects:
         assert before, f"no shipped registrations found in {models_dir}"
 
         proc = subprocess.run(
-            ["bash", str(DEMO_SH), "--smoke"],
+            ["bash", str(script), "--smoke"],
             capture_output=True,
             text=True,
             timeout=60,
-            cwd=str(bucket_copy),
+            cwd=str(examples_copy / "demo-bucket"),
             env=os.environ.copy(),
         )
         assert proc.returncode == 0, f"--smoke failed: stderr={proc.stderr!r}"
