@@ -369,3 +369,18 @@ Append durable decisions and completed goal progress here.
   - Added `tests/test_install.py` with 4 smoke tests: full CLI pipeline (init→add→index→search), entry point accessibility, prompts directory location, and all prompt file loading.
   - 482 tests pass (4 new), lint clean.
 - **Phase 10.4 status**: COMPLETE. All Phase 10 items done.
+
+## 2026-11-09: demo-bucket fixtures shipped — root cause of the CI `test (3.11)` / `demo-smoke` failure
+
+- **Commit**: `a539b5e` fix(examples): ship demo-bucket fixtures so CI demo tests can pass (recovered from candidate `2b3a3b2`, parent `272c3fc`)
+- **Root cause**: the `.gitignore` user-data patterns were unanchored (`records/`, `config/`, `inbox/`, `.kb/`), so they matched the demo bucket's fixture paths under `examples/demo-bucket/` at any depth. `examples/demo-bucket/config/kb.yml` and the 12 `examples/demo-bucket/records/doc/**` samples were therefore never committed, and CI checkouts of the tool repo lacked them.
+  - Reproduced on base `272c3fc`: `pytest -q -- tests/test_demo.py::TestDemoBucketExists tests/test_demo.py::TestDemoShStatic` → 4 failed, 4 passed (fixture files absent).
+- **Fix**:
+  - anchored the ignore patterns to the repo root (`/records/`, `/config/`, `/inbox/`, `/.kb/`) so they no longer reach into `examples/`;
+  - ignore only the regenerable runtime state `demo.sh` writes back (`examples/demo-bucket/.kb/index.db`, `finetune/`, `improve/`, `models/eval/`);
+  - committed the demo bucket fixtures: `config/kb.yml`, 12 `records/doc/**` sample docs, `inbox/.gitkeep`, `.kb/.gitkeep`, and the registered baseline models `kb-rag-v1.json` / `kb-rag-v2.json`.
+- **Verification**: `pytest tests/ -q` → 710 passed, 0 failed; `ruff check src/ tests/` → clean; the failed run's own command (`tests/test_demo.py` bucket + smoke selectors) → 7 passed, matching the failing run's stdout.
+- **Infrastructure fault (not a candidate regression)**: failed run `20261109-200925-065664` recorded `exit_code -2` (SIGINT) even though pytest had already printed `7 passed` and written its junit XML; the harness evidence-capture step killed the process after completion, so AC3/AC4 came back `unverified` and landing failed. The same command against candidate `2b3a3b2` exits 0 with identical stdout. This is an ai-hub-side evidence-capture issue, outside this repository's scope, and is reported through the TAS path only.
+- **Decisions**:
+  - Root-anchored ignore patterns for user-data directories: they are meant for the tool repo root only, and must never swallow `examples/` fixtures.
+  - Only regenerable runtime artifacts of the demo bucket stay ignored; the fixtures themselves are committed so CI checkouts can run the demo.
