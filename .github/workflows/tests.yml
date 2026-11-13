@@ -79,7 +79,10 @@ jobs:
           cd "$RUNNER_TEMP"
           kb init kb-smoke
           (cd kb-smoke && kb add --title smoke --content "hello kb")
-          kb search "hello" --path kb-smoke
+          # `kb search` operates on the bucket in the current directory; it
+          # has never had a --path option, so the old invocation aborted
+          # this job with a click UsageError instead of testing anything.
+          (cd kb-smoke && kb search "hello")
       - name: Cleanup venv
         if: always()
         run: rm -rf .venv-smoke

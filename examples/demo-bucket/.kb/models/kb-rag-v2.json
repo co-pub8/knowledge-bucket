@@ -1,0 +1,11 @@
+{
+  "id": "kb-rag-v2",
+  "display_name": "kb-rag-v2",
+  "base_model": "claude-opus-4-7",
+  "backend": "external",
+  "created_at": "2026-11-09T20:17:12Z",
+  "updated_at": "2026-11-09T20:17:12Z",
+  "dataset_path": ".kb/training/sft-dataset/train.jsonl",
+  "notes": "demo candidate (v2)",
+  "tags": []
+}

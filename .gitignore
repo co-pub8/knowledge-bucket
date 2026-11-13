@@ -3,10 +3,20 @@
 docs/MEMO.txt
 
 # === user data directories (managed by kb init in separate repos) ===
-records/
-config/
-inbox/
-.kb/
+# Anchored to the repo root: unanchored `records/` etc. also swallowed the
+# examples/demo-bucket fixtures, so CI checkouts lacked the demo bucket.
+/records/
+/config/
+/inbox/
+/.kb/
+
+# examples/demo-bucket ships its fixtures (config + docs + registered models),
+# but running demo.sh writes regenerable runtime state back into the bucket's
+# .kb/ — keep only that remainder ignored.
+examples/demo-bucket/.kb/index.db
+examples/demo-bucket/.kb/finetune/
+examples/demo-bucket/.kb/improve/
+examples/demo-bucket/.kb/models/eval/
 
 # === Python test artifacts ===
 .coverage
@@ -15,6 +25,9 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .claude/worktrees/
+
+# === local agent-tool scratch ===
+.serena/
 
 # === Python build / packaging artifacts ===
 *.egg-info/
@@ -27,3 +40,6 @@ MANIFEST
 .venv/
 .venv-*/
 venv/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
