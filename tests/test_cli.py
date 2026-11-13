@@ -5,9 +5,18 @@ import os
 from unittest.mock import patch
 
 import pytest
-from click.testing import CliRunner
 
-from kb import models as registry  # noqa: F401 — used by TestModelsShowEvalScores
+# The CLI cannot even be imported without click, so the whole module is
+# skipped (not failed) in an environment where the dependency is absent.
+pytest.importorskip(
+    "click",
+    reason="click is not installed in this environment",
+    exc_type=ImportError,
+)
+
+from click.testing import CliRunner  # noqa: E402
+
+from kb import models as registry  # noqa: F401,E402 — used by TestModelsShowEvalScores
 from kb.cli import main
 from kb.core import DOC_DIR, RECORDS_DIR, shard_path  # noqa: F401 — Phase 13.2 tests
 from kb.index import (  # noqa: F401 — used by TestHealthModelsFlag

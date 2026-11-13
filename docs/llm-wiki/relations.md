@@ -1,0 +1,22 @@
+# Repository relations
+Repository: knowledge-bucket
+
+## ai-hub
+- Status: confirmed
+- Relationship: subject/provider — ai-hub's verification harness consumes this repository as the candidate under test (it copies a worktree, runs `pytest` against it and binds the result as acceptance evidence); this repository owns the `kb` package, its on-disk bucket format and its test suite, and ships the configuration that makes the suite collectable in a foreign environment.
+- Responsibility: knowledge-bucket owns the package layout (`src/` layout), the pytest configuration (`[tool.pytest.ini_options]`) and the demo fixtures that the harness copies; ai-hub owns the verification environment, the candidate-binding rules and the selector-to-outcome matching.
+- Canonical sources: knowledge-bucket — `SYSTEM_CONSTITUTION.md`, `PURPOSE.md`, `docs/GOVERNANCE.md`, `pyproject.toml`; ai-hub — `tools/eval/verification_workspace.py`, `tools/eval/verification_copy.py`, `tools/eval/test_evidence.py`.
+- Change rule: when knowledge-bucket changes its test layout, packaging layout or any file that a test run rewrites, inspect ai-hub's `tools/eval/verification_workspace.py` (a tracked file changed during the run invalidates the candidate binding, `exit_code -2`, `verification_candidate_binding_changed`) and `tools/eval/test_evidence.py` (acceptance criteria must name function-level pytest node ids — a class-level selector such as `tests/test_core.py::TestUlid` matches no case and is reported as `matched=0`).
+- Evidence: knowledge-bucket:pyproject.toml sha256:ffd34a03677622140f9cbcfab6713fbac8be06c743ae4b79b995b2deaa330ae2
+- Evidence: knowledge-bucket:.gitignore sha256:dc07d2ac23592a1f407115db75b5aeed5ea2e19353fbcf2ae5dcdb73a259cca7
+- Evidence: knowledge-bucket:tests/test_release.py sha256:d43686daf83977fab7ba5957778b2883a537923c210353b6daea39d762f78b2c
+- Evidence: knowledge-bucket:examples/demo-bucket/config/kb.yml sha256:2e322797462762f884d9ef4c666d21240634bd99f41456faf5276c2c8e5113b7
+- Evidence: knowledge-bucket:tests/test_collection.py sha256:e992cf64b3cca9191f60b8f8fa94b2da78cdbbef22456d5ad9b50e4b4ca84b9d
+- Evidence: knowledge-bucket:tests/test_cli.py sha256:719c049a1a1a76f1f47adace2590364a961ef46f079ffd13a667e1839153090c
+- Evidence: knowledge-bucket:tests/test_health.py sha256:cf609f523635fe250c7d4695fdfd2582f690e43487529ccf6d72b72016d92b18
+- Evidence: ai-hub:tools/eval/test_evidence.py sha256:99e0da408391cdb0a26cc20891cf82d3a292809d0a77f5410001a959fc723bfc
+- Evidence: ai-hub:tools/eval/verification_workspace.py sha256:aafa76498d851525e42a36b74f5fb7c7141332432b0c4227dfab13a95f09e3c9
+- Evidence: ai-hub:tools/eval/verification_copy.py sha256:3b085b3cd3b54d9efffff99a09d6108bf366bf21cac4c0dcd9ba0715b7e41e8c
+- Observation: ai-hub's `tools/eval/test_evidence.py::_matches` maps a pytest selector `file::Class::test` onto the junit `classname`/`name` pair; the junit classnames produced by this repository are `tests.<module>.<Class>` (e.g. `tests.test_core.TestUlid`), which is what the selectors in the recorded acceptance criteria use.
+- Observation: the ai-hub deployment verification virtualenv has the `kb` package *not* installed, so `tests/test_core.py`, `tests/test_models.py` and `tests/test_ingest.py` failed to collect there until this repository set `[tool.pytest.ini_options] pythonpath = ["src"]`; the same virtualenv also lacks `click`, `flask`, `pyarrow`, `pypdf` and `build`. Until 2026-11-09 those gaps broke collection outright there (`5 errors during collection`, plus `15 failed, 7 errors`); this repository now declares each third-party dependency in the test that needs it, so the deployment venv runs the whole suite green (`518 passed, 18 skipped`, exit code 0) and the affected tests *skip* instead of erroring. The dependencies are still absent there, so those tests do not actually execute in the verification environment — that part is environmental and remains the ai-hub follow-up below.
+- Follow-up: [ ] ai-hub — provisioning of the target repository's declared dependencies in the verification virtualenv; triggering change: acceptance verification of knowledge-bucket runs `pytest` in the deployment venv; remaining work: install `click`, `flask`, `pyarrow`, `pypdf` and `build` (or install the candidate package with its dependencies) for the verification copy, so that the tests which currently skip there actually run; completion condition: in the deployment venv `python -m pytest tests/ -q` reports no skipped test caused by a missing dependency (currently 18 skips) and exits 0.

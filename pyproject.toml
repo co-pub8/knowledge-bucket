@@ -67,6 +67,11 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make `import kb` resolve from the source checkout so the suite collects
+# without an editable install (`pip install -e .`). Without this, a plain
+# `pytest` run in an environment where the package is not installed fails
+# at collection time with "ModuleNotFoundError: No module named 'kb'".
+pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (build + venv install; opt-in via -m slow)",
 ]

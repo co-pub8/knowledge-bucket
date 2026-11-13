@@ -50,6 +50,17 @@ def pyproject_version(pyproject_data: dict) -> str:
 @pytest.fixture(scope="session")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory, pyproject_version: str) -> Path:
     """Build the wheel once per test session, return path to the .whl file."""
+    # Building a wheel needs a usable `python -m build` (the 'build' dev
+    # extra). When it is not installed the wheel tests are skipped instead
+    # of erroring out.
+    probe = subprocess.run(
+        [sys.executable, "-m", "build", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"'python -m build' is not usable here: {probe.stderr.strip()}")
     out = tmp_path_factory.mktemp("wheel")
     # Use the system pip (the one running the tests) so we don't fight
     # venvs in the middle of pytest.
@@ -69,6 +80,22 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory, pyproject_version: str
     return wheels[0]
 
 
+def _pypi_reachable() -> bool:
+    """Whether PyPI can be reached from this environment.
+
+    Installing the wheel into a fresh venv resolves its runtime
+    dependencies from PyPI, so an offline environment cannot run the
+    fresh-venv install tests. Probe once and skip instead of failing.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("pypi.org", 443), timeout=5).close()
+    except OSError:
+        return False
+    return True
+
+
 @pytest.fixture(scope="session")
 def wheel_and_venv(
     built_wheel: Path, tmp_path_factory: pytest.TempPathFactory
@@ -78,6 +105,8 @@ def wheel_and_venv(
     Used by TestFreshVenvInstall to assert kb --version / --help / init
     work after a real wheel install in a clean environment.
     """
+    if not _pypi_reachable():
+        pytest.skip("PyPI is not reachable from this environment")
     venv = tmp_path_factory.mktemp("venv") / "kb-venv"
     t0 = time.time()
     subprocess.run(
@@ -129,6 +158,22 @@ class TestPyprojectFields:
         names = {re.split(r"[<>=!~]", d)[0].strip() for d in deps}
         for required in ("click", "flask", "pypdf", "pyyaml"):
             assert required in names, f"{required} missing from dependencies"
+
+    def test_pytest_pythonpath_includes_src(self, pyproject_data: dict):
+        """The suite must collect from a source checkout, installed or not.
+
+        ``[tool.pytest.ini_options] pythonpath`` puts ``src/`` on
+        ``sys.path`` for the test session, so ``import kb`` resolves even
+        when the package was never pip-installed. Without it, a pytest
+        run in an environment that has not installed the package dies at
+        collection time with "ModuleNotFoundError: No module named 'kb'"
+        and every selected test is reported as unmatched.
+        """
+        ini = pyproject_data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+        assert "src" in ini.get("pythonpath", []), (
+            "[tool.pytest.ini_options] pythonpath must include 'src' so the "
+            "suite collects without `pip install -e .`"
+        )
 
 
 # ---------------------------------------------------------------------------

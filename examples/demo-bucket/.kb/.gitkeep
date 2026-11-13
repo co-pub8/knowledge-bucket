@@ -1,0 +1,2 @@
+Keeps the demo bucket's .kb/ directory in git; regenerable runtime state
+(index.db, finetune/, improve/, models/eval/) stays ignored.

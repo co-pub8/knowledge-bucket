@@ -4,6 +4,20 @@ import os
 
 import pytest
 
+try:  # pragma: no cover - depends on the environment
+    import flask  # noqa: F401
+
+    FLASK_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on the environment
+    FLASK_AVAILABLE = False
+
+try:  # pragma: no cover - depends on the environment
+    import click  # noqa: F401
+
+    CLICK_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on the environment
+    CLICK_AVAILABLE = False
+
 from kb.core import DOC_DIR, RECORDS_DIR, ensure_dirs, generate_ulid, shard_path
 from kb.graph import init_graph_tables
 from kb.health import compute_health
@@ -260,6 +274,7 @@ class TestComputeHealth:
         assert "rag" not in hub_ids
 
 
+@pytest.mark.skipif(not FLASK_AVAILABLE, reason="flask is not installed in this environment")
 class TestHealthWebUI:
     @pytest.fixture
     def client(self, kb):
@@ -504,6 +519,7 @@ class TestHealthModelsJsonShape:
         assert report["model_evals"][0]["model_id"] == "graphy"
 
 
+@pytest.mark.skipif(not CLICK_AVAILABLE, reason="click is not installed in this environment")
 class TestHealthModelsCLIRoundTrip:
     """`kb health --models --json` round-trips the model_evals list."""
 

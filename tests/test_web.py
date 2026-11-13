@@ -4,10 +4,17 @@ import os
 
 import pytest
 
-from kb.core import DOC_DIR, RECORDS_DIR, ensure_dirs, generate_ulid, shard_path
-from kb.graph import init_graph_tables
-from kb.index import index_document, init_db
-from kb.web import create_app
+# The web UI is built on flask; without it the module cannot be collected.
+pytest.importorskip(
+    "flask",
+    reason="flask is not installed in this environment",
+    exc_type=ImportError,
+)
+
+from kb.core import DOC_DIR, RECORDS_DIR, ensure_dirs, generate_ulid, shard_path  # noqa: E402
+from kb.graph import init_graph_tables  # noqa: E402
+from kb.index import index_document, init_db  # noqa: E402
+from kb.web import create_app  # noqa: E402
 
 
 @pytest.fixture

@@ -6,7 +6,19 @@ from unittest.mock import patch
 
 import pytest
 
-from kb.parsers.pdf import extract_pdf_metadata, extract_pdf_text, parse_pdf
+# PDF parsing needs pypdf at call time; without it the module cannot be
+# exercised, so skip it instead of failing.
+pytest.importorskip(
+    "pypdf",
+    reason="pypdf is not installed in this environment",
+    exc_type=ImportError,
+)
+
+from kb.parsers.pdf import (  # noqa: E402
+    extract_pdf_metadata,
+    extract_pdf_text,
+    parse_pdf,
+)
 
 
 def _create_test_pdf(
