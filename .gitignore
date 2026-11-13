@@ -3,9 +3,14 @@
 docs/MEMO.txt
 
 # === user data directories (managed by kb init in separate repos) ===
-records/
-config/
-inbox/
+# Anchored to the repo root: unanchored patterns also matched the shipped
+# examples/demo-bucket/ content (config/kb.yml, records/doc/*, inbox/) and
+# silently kept it out of git, which is what broke CI on fresh checkouts.
+# .kb/ stays unanchored on purpose: it is a runtime cache dir that must
+# never be tracked at any depth (PURPOSE.md completion criterion 5).
+/records/
+/config/
+/inbox/
 .kb/
 
 # === Python test artifacts ===
@@ -27,3 +32,6 @@ MANIFEST
 .venv/
 .venv-*/
 venv/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
