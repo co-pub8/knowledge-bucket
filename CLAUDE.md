@@ -48,6 +48,9 @@ GOAL.md や個別の指示より優先する。**外部共有禁止・PyPI 公�
 
 - `docs/GOVERNANCE.md` — 最上位ルール
 - `docs/GOAL.md` — 現在の標的とミッション
+- `ORDER.md` — 長期計画の正本（到達点・現状との差・優先順・出口条件）
+- `docs/MILESTONES.md` — マイルストーンの実行用分解（ORDER.md / GOAL.md を参照）
+- `REPO_METADATA.json` — 計画メタデータの投影（schema_version=1）
 - `docs/FEEDBACK_LOOP.md` — フィードバックループのプレイブック
 - `docs/MEMO.txt` — セッション横断の共有ノート
 - `docs/TRAINING_DATA_GENERATION.md` — SFT データ生成のプレイブック

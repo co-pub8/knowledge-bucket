@@ -369,3 +369,16 @@ Append durable decisions and completed goal progress here.
   - Added `tests/test_install.py` with 4 smoke tests: full CLI pipeline (init→add→index→search), entry point accessibility, prompts directory location, and all prompt file loading.
   - 482 tests pass (4 new), lint clean.
 - **Phase 10.4 status**: COMPLETE. All Phase 10 items done.
+
+## 2026-11-03: main CI fix — shipped demo bucket was never tracked
+
+- **Commit**: `fix(ci): track demo-bucket content excluded by unanchored gitignore patterns`
+- **What**:
+  - Root cause of the red `main` CI (since 2026-06-15) and of the stranded PR #1: the user-data ignore patterns `records/`, `config/`, `inbox/` were unanchored, so they also matched `examples/demo-bucket/`. Commit 60cbdf4's shipped demo bucket (`config/kb.yml`, `inbox/.gitkeep`, 12 `records/doc/<shard>/<shard>/<ulid>.md` sample docs) was silently never tracked; every fresh checkout had an empty demo bucket, so `tests/test_demo.py` failed 8 assertions and the `demo-smoke` job failed with "Demo bucket not initialized".
+  - Fix: anchored the patterns to the repository root (`/records/`, `/config/`, `/inbox/`), kept `.kb/` unanchored on purpose (runtime cache must never be tracked at any depth — PURPOSE.md completion criterion 5), and committed the shipped demo bucket content byte-identical (sha256-verified) to the authoritative copies under `/Users/jinno/knowledge-bucket/examples/demo-bucket/`.
+  - Also ignored the local `.serena/` scratch dir (per-worktree tool config) and recorded the repository relations memo at `docs/llm-wiki/relations.md`.
+- **Decisions**:
+  - The Phase 10.2 intent ("`.gitignore` blocks all four data directories at repo root") was correct; the implementation was not anchored. The patterns now match only the repo root.
+  - The fix is committed on both `tas/auto-care/20261103` and the run's chain branch `ai/knowledge-bucket/instruction-20261103-060017-585790`: the two earlier care runs (2026-10-24, 2026-11-02) left HEAD on the care branch only, so the harness landing rejected the worktree and the fix never reached origin/main.
+- **Verification**: `pytest tests/test_demo.py -q` -> 14 passed; `pytest tests/ -q` -> 705 passed, 4 failed in `tests/test_release.py` (fresh-venv wheel install; the same 4 fail on the unmodified base commit in this environment — environmental, not caused by this change); `ruff check src/ tests/` -> All checks passed; `bash examples/demo.sh --smoke` -> exit 0, empty stderr.
+- **Status**: fix complete and verified locally; origin/main stays red until the harness lands the branch (see `docs/llm-wiki/relations.md`).
