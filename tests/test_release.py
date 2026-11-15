@@ -15,6 +15,7 @@ scope and were deleted alongside release.yml.
 """
 
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 README_PATH = REPO_ROOT / "README.md"
 GITIGNORE_PATH = REPO_ROOT / ".gitignore"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "tests.yml"
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,17 @@ def pyproject_version(pyproject_data: dict) -> str:
 @pytest.fixture(scope="session")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory, pyproject_version: str) -> Path:
     """Build the wheel once per test session, return path to the .whl file."""
+    # Building a wheel needs a usable `python -m build` (the 'build' dev
+    # extra). When it is not installed the wheel tests are skipped instead
+    # of erroring out.
+    probe = subprocess.run(
+        [sys.executable, "-m", "build", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"'python -m build' is not usable here: {probe.stderr.strip()}")
     out = tmp_path_factory.mktemp("wheel")
     # Use the system pip (the one running the tests) so we don't fight
     # venvs in the middle of pytest.
@@ -69,6 +82,22 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory, pyproject_version: str
     return wheels[0]
 
 
+def _pypi_reachable() -> bool:
+    """Whether PyPI can be reached from this environment.
+
+    Installing the wheel into a fresh venv resolves its runtime
+    dependencies from PyPI, so an offline environment cannot run the
+    fresh-venv install tests. Probe once and skip instead of failing.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("pypi.org", 443), timeout=5).close()
+    except OSError:
+        return False
+    return True
+
+
 @pytest.fixture(scope="session")
 def wheel_and_venv(
     built_wheel: Path, tmp_path_factory: pytest.TempPathFactory
@@ -78,6 +107,8 @@ def wheel_and_venv(
     Used by TestFreshVenvInstall to assert kb --version / --help / init
     work after a real wheel install in a clean environment.
     """
+    if not _pypi_reachable():
+        pytest.skip("PyPI is not reachable from this environment")
     venv = tmp_path_factory.mktemp("venv") / "kb-venv"
     t0 = time.time()
     subprocess.run(
@@ -129,6 +160,22 @@ class TestPyprojectFields:
         names = {re.split(r"[<>=!~]", d)[0].strip() for d in deps}
         for required in ("click", "flask", "pypdf", "pyyaml"):
             assert required in names, f"{required} missing from dependencies"
+
+    def test_pytest_pythonpath_includes_src(self, pyproject_data: dict):
+        """The suite must collect from a source checkout, installed or not.
+
+        ``[tool.pytest.ini_options] pythonpath`` puts ``src/`` on
+        ``sys.path`` for the test session, so ``import kb`` resolves even
+        when the package was never pip-installed. Without it, a pytest
+        run in an environment that has not installed the package dies at
+        collection time with "ModuleNotFoundError: No module named 'kb'"
+        and every selected test is reported as unmatched.
+        """
+        ini = pyproject_data.get("tool", {}).get("pytest", {}).get("ini_options", {})
+        assert "src" in ini.get("pythonpath", []), (
+            "[tool.pytest.ini_options] pythonpath must include 'src' so the "
+            "suite collects without `pip install -e .`"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +247,92 @@ class TestRepoHygiene:
                     f" Use 'pip install -e \\\".[dev]\\\"' for source install."
                     f" Offending line: {line!r}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# CI workflow — its steps drive the installed CLI
+# ---------------------------------------------------------------------------
+
+
+def _kb_invocations(script: str, known_commands: set[str]) -> list[tuple[str | None, list[str]]]:
+    """Extract the `kb` invocations of a shell script.
+
+    Returns (subcommand, options) pairs; subcommand is None for a
+    group-level call such as `kb --version`.
+    """
+    invocations: list[tuple[str | None, list[str]]] = []
+    for raw in script.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(line, comments=True)
+        except ValueError:
+            continue
+        for i, token in enumerate(tokens):
+            if token != "kb":
+                continue
+            rest = tokens[i + 1 :]
+            sub = rest[0] if rest and rest[0] in known_commands else None
+            options: list[str] = []
+            for tok in rest[1:] if sub else rest:
+                if tok in ("|", "||", "&&", ";", "&"):
+                    break
+                if tok.startswith("-"):
+                    options.append(tok)
+            invocations.append((sub, options))
+    return invocations
+
+
+def _option_strings(command) -> set[str]:
+    """Every option string a click command accepts, plus the lazy --help."""
+    options = {"--help"}
+    for param in command.params:
+        options.update(param.opts)
+        options.update(param.secondary_opts)
+    return options
+
+
+class TestCIWorkflowInvocations:
+    """Every `kb` call in the CI workflow must use options the CLI defines.
+
+    The install-smoke job used to run `kb search "hello" --path kb-smoke`.
+    `kb search` has never had a --path option, so the job aborted with a
+    click UsageError (exit 2) instead of exercising the installed wheel —
+    a failure mode that only surfaces once the earlier jobs are green.
+    """
+
+    def test_workflow_kb_invocations_use_supported_options(self):
+        pytest.importorskip("click")
+        yaml = pytest.importorskip("yaml")
+        from kb import cli
+
+        if not CI_WORKFLOW_PATH.exists():
+            pytest.skip(f"no CI workflow at {CI_WORKFLOW_PATH}")
+
+        workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text())
+        commands = cli.main.commands
+        group_allowed = _option_strings(cli.main)
+        allowed_for = {name: _option_strings(cmd) for name, cmd in commands.items()}
+
+        offenders: list[str] = []
+        for job_name, job in (workflow.get("jobs") or {}).items():
+            for step in job.get("steps") or []:
+                script = step.get("run")
+                if not script:
+                    continue
+                for sub, options in _kb_invocations(script, set(commands)):
+                    allowed = group_allowed if sub is None else allowed_for[sub]
+                    for option in options:
+                        if option not in allowed:
+                            call = f"kb {sub} {option}" if sub else f"kb {option}"
+                            offenders.append(f"{job_name}: {call}")
+
+        assert not offenders, (
+            "CI workflow uses kb options the CLI does not define: "
+            f"{offenders}. `kb --help` lists the supported options; a stale "
+            "option fails the job with a click UsageError."
+        )
 
 
 # ---------------------------------------------------------------------------

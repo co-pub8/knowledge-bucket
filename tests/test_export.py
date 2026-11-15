@@ -2,12 +2,21 @@
 
 import os
 
-import pyarrow.parquet as pq
 import pytest
 
-from kb.core import DOC_DIR, RECORDS_DIR, ensure_dirs, generate_ulid, shard_path
-from kb.graph import init_graph_tables
-from kb.index import index_document, index_path, init_db
+# Parquet export is an optional extra (pyarrow); without it the module
+# cannot be collected.
+pytest.importorskip(
+    "pyarrow",
+    reason="pyarrow is not installed in this environment",
+    exc_type=ImportError,
+)
+
+import pyarrow.parquet as pq  # noqa: E402
+
+from kb.core import DOC_DIR, RECORDS_DIR, ensure_dirs, generate_ulid, shard_path  # noqa: E402
+from kb.graph import init_graph_tables  # noqa: E402
+from kb.index import index_document, index_path, init_db  # noqa: E402
 
 
 @pytest.fixture
