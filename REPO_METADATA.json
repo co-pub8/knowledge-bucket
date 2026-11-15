@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-10-24T18:46:21Z",
+  "long_term": {
+    "summary": "自己強化型ナレッジ管理システムkb-toolsの長期計画。正本(不変ID付きMarkdown)と再生成可能キャッシュの原則下で、第1段階=自己corpusでのフィードバックループ1サイクル完走、第2段階=2周連続改善のe2e証明、以後corpus拡大・規模化・Web UI刷新。全段階はGOVERNANCEの完全プライベート制約内で進める。",
+    "source": "ORDER.md",
+    "source_hash": "git-blob:9afe152cb2d4cf3607f51dc29fbf8631990ecef3",
+    "updated_at": "2026-10-24"
+  },
+  "short_term": {
+    "summary": "kb-tools自身のcorpusで kb init→analyze→sft→外部fine-tune→evaluate→improve の1サイクルを完走し、run_idをFEEDBACK_LOOP.md §11に記録する(GOAL.md完了基準1-7)。",
+    "source": "docs/GOAL.md",
+    "source_hash": "git-blob:0ac6fdd84470dd4c0e297c48cc181ee46f582c4d",
+    "updated_at": "2026-06-16",
+    "status": "not_started"
+  }
+}
